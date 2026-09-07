@@ -291,6 +291,8 @@ def _upsert(args: dict, action: str) -> dict:
         embedder = get_embedder()
 
         existing_ids = _find_matching_ids(store, source, version)
+        if action == "update" and not existing_ids:
+            return {"status": "not_found", "source": source, "version": version}
         existing_first: Dict[str, Any] = {}
         if existing_ids:
             existing_first = store.get_metadata(existing_ids[0]) or {}
@@ -513,7 +515,8 @@ RETRIEVAL_TOOLS = [
         "description": (
             "Replace the stored content of a document identified by "
             "(source, version). Old chunks are removed and the new content "
-            "is re-chunked and re-embedded."
+            "is re-chunked and re-embedded. Returns not_found when no "
+            "stored document matches (source, version)."
         ),
         "inputSchema": UPDATE_DOCUMENT,
         "_handler": handle_update_document,

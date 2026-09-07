@@ -413,6 +413,19 @@ class TestUpdateDocument(InmemoryBackendTestBase):
         ]
         self.assertEqual(phoenix, [])
 
+    def test_update_missing_document_reports_not_found(self):
+        result = handle_update_document(
+            {
+                "content": make_doc("neverseen"),
+                "source": "never_stored",
+                "version": "v1",
+            }
+        )
+        self.assertEqual(result["status"], "not_found")
+        self.assertEqual(result["source"], "never_stored")
+        self.assertEqual(result["version"], "v1")
+        self.assertEqual(get_vector_store().count(), 0)
+
 
 class TestRemoveDocument(InmemoryBackendTestBase):
     def test_remove_deletes_every_chunk(self):
