@@ -763,6 +763,25 @@ class TestPersistence(InmemoryBackendTestBase):
 
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_corrupt_store_fails_on_startup(self):
+        """A broken persisted store must raise immediately, not silently
+        fall back to an empty store that would overwrite the user's data
+        on the first persist."""
+        tmpdir = tempfile.mkdtemp(prefix="semantica_vec_test_")
+        try:
+            # Drop a file that looks like a store directory but won't load.
+            with open(os.path.join(tmpdir, "store_data.json"), "w") as f:
+                f.write("{not valid json")
+            os.environ["SEMANTICA_VECTOR_PATH"] = tmpdir
+            reset_vector_store()
+            with self.assertRaises(ValueError) as ctx:
+                get_vector_store()
+            self.assertIn("Could not load", str(ctx.exception))
+        finally:
+            import shutil
+
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -141,7 +141,9 @@ def get_vector_store() -> Any:
                 store.load(vector_path)
                 log.info("Vector store loaded from %s", vector_path)
             except Exception as exc:
-                log.warning("Could not load vector store from %s: %s", vector_path, exc)
+                raise ValueError(
+                    f"Could not load vector store from {vector_path}: {exc}"
+                ) from exc
             loaded_dim = getattr(store, "dimension", None)
             if loaded_dim and loaded_dim != config["dimension"]:
                 raise ValueError(
