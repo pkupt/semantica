@@ -31,13 +31,13 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
-from mcp.schemas import (
+from ..schemas import (
     REMOVE_DOCUMENT,
     RETRIEVE_CONTEXT,
     STORE_DOCUMENT,
     UPDATE_DOCUMENT,
 )
-from mcp.session import get_embedder, get_graph, get_vector_store
+from ..session import get_embedder, get_graph, get_vector_store
 
 log = logging.getLogger("semantica.mcp.tools.retrieval")
 
