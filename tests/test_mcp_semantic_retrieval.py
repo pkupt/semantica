@@ -26,12 +26,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import mcp.session as session
+import semantica_mcp.mcp.session as session
 import semantica.embeddings as _embeddings_pkg
 import semantica.vector_store.vector_store as _vs_module
-from mcp.session import get_vector_store, reset_vector_store
-from mcp.tools import TOOL_DEFINITIONS
-from mcp.tools.retrieval import (
+from semantica_mcp.mcp.session import get_vector_store, reset_vector_store
+from semantica_mcp.mcp.tools import TOOL_DEFINITIONS
+from semantica_mcp.mcp.tools.retrieval import (
     _chunk_id,
     _chunk_text,
     handle_remove_document,
