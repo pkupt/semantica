@@ -107,3 +107,17 @@ class MilvusErasureIntegrationTest(TestCase):
         coord = ErasureCoordinator(vector_store=vs)
         receipt = coord.erase_entity("customer-4471")
         self.assertEqual(receipt.stores["vectors"]["backend"], "milvus")
+
+    def test_facade_delete_vectors_forwards_to_milvus(self):
+        """VectorStore.delete_vectors() delegates to MilvusStore and returns its dict.
+
+        ErasureCoordinator probes _backend_store directly, so this test
+        exercises the public VectorStore facade path that other callers use.
+        """
+        vs, coll = self._bind_milvus_as_vector_store()
+        coll.collection.delete.return_value = MagicMock(delete_count=2)
+
+        ret = vs.delete_vectors(["id-1", "id-2"])
+
+        coll.collection.delete.assert_called_once()
+        self.assertEqual(ret, {"delete_count": 2})
