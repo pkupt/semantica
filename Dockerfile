@@ -20,7 +20,7 @@ RUN mkdir -p /app/semantica && npm run build
 # .github/dependabot.yml opens a PR bumping the digest pin above. Also: this
 # image only serves plain HTTP via uvicorn and never opens a QUIC listener,
 # so the bug isn't reachable here regardless.
-FROM python:3.13-slim@sha256:7ce4b6dfe35e55397b7cda544f8a13f191b7ae28dc5aad71fe664dbc9bc2623f AS runtime
+FROM python:3.14-slim@sha256:cae66f2ef0ec51a9891263eeee7f987dacf0a9879e8aa9353d5606e0530619a5 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -34,18 +34,18 @@ RUN groupadd --system semantica \
     && useradd --system --gid semantica --home-dir /app --shell /usr/sbin/nologin semantica
 
 COPY pyproject.toml README.md LICENSE MANIFEST.in \
-     .github/requirements/explorer-extra-py313.txt .github/requirements/pep517-build.txt ./
+     .github/requirements/explorer-extra-py314.txt .github/requirements/pep517-build.txt ./
 COPY semantica/ ./semantica/
 COPY integrations/ ./integrations/
 COPY --from=frontend-builder /app/semantica/static ./semantica/static
 
-# explorer-extra-py313.txt is `uv pip compile pyproject.toml --extra explorer
-# --python-version 3.13 --constraint requirements-ci.txt --generate-hashes`
+# explorer-extra-py314.txt is `uv pip compile pyproject.toml --extra explorer
+# --python-version 3.14 --constraint requirements-ci.txt --generate-hashes`
 # (see ci.yml's explorer-extra-py311.txt for the CI counterpart, resolved
 # for CI's python 3.11 instead - the two aren't interchangeable: audioread
 # (via librosa) needs standard-aifc/standard-sunau only on python>=3.13,
 # since aifc/sunau left stdlib there, so a 3.11-resolved lockfile is
-# missing hashes pip needs on this image's actual 3.13 interpreter and
+# missing hashes pip needs on this image's actual 3.14 interpreter and
 # --require-hashes fails outright rather than silently under-pinning).
 # Every fetched package is hash-verified (Scorecard Pinned-Dependencies)
 # and pinned to the same versions CI audited, e.g. msgpack==1.2.1 and
@@ -59,9 +59,9 @@ COPY --from=frontend-builder /app/semantica/static ./semantica/static
 # build-system.requires; installing it first and passing
 # --no-build-isolation makes pip reuse those hash-verified copies instead
 # of fetching its own.
-RUN pip install --no-cache-dir -r explorer-extra-py313.txt -r pep517-build.txt --require-hashes \
+RUN pip install --no-cache-dir -r explorer-extra-py314.txt -r pep517-build.txt --require-hashes \
     && pip install --no-cache-dir --no-deps --no-build-isolation . \
-    && rm -f explorer-extra-py313.txt pep517-build.txt \
+    && rm -f explorer-extra-py314.txt pep517-build.txt \
     && chown -R semantica:semantica /app
 
 USER semantica
