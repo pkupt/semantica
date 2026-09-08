@@ -31,12 +31,18 @@ def _align_endpoints(ontology: Dict[str, Any]) -> Dict[str, Any]:
     into its concept vocabulary, defeating the gate.  Unconstrained is the honest
     reading of "did not clear the gate", so such endpoints become ``owl:Thing``.
     """
-    declared = {
-        (c.get("name") or c.get("label"))
-        for c in ontology.get("classes", [])
-        if isinstance(c, dict)
-    }
-    declared.discard(None)
+    declared = set()
+    for c in ontology.get("classes", []):
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name") or c.get("label")
+        if name:
+            declared.add(name)
+        # Property endpoints carry the *raw* entity type while class names are
+        # normalized ("person" -> "Person"); match both spellings.
+        inferred_from = (c.get("metadata") or {}).get("inferred_from")
+        if isinstance(inferred_from, str):
+            declared.add(inferred_from)
     for prop in ontology.get("properties", []):
         if not isinstance(prop, dict):
             continue

@@ -144,15 +144,57 @@ def test_sparse_endpoint_types_not_folded_back_by_from_ontology():
 
 
 def test_ttl_iris_consistent_with_declared_classes():
-    # Finding 2: domain/range endpoints must resolve to the same IRIs as the
-    # declared classes (no split between hashed and speaking IRIs).
+    # Finding 2: with hash IRIs (use_speaking_iris=False), a serializer that
+    # ignores the generator's namespace manager resolves domain/range to
+    # speaking IRIs while declared classes use hashed ones, leaving properties
+    # pointing at undeclared resources. Parse the TTL and require every
+    # domain/range endpoint to be a declared owl:Class node.
+    from rdflib import Graph
+    from rdflib.namespace import OWL, RDF, RDFS
+
     entities, rels = _sample()
+    result = bootstrap_schema(entities, rels, use_speaking_iris=False)
+    g = Graph().parse(data=result["ttl"], format="turtle")
+    class_nodes = set(g.subjects(RDF.type, OWL.Class))
+    endpoints = set(g.objects(None, RDFS.domain)) | set(
+        g.objects(None, RDFS.range)
+    )
+    # xsd datatypes may appear as ranges of data properties; only class-like
+    # URIRef endpoints must be declared.
+    from rdflib import URIRef
+    from rdflib.namespace import XSD
+
+    xsd = str(XSD)
+    class_endpoints = {
+        e
+        for e in endpoints
+        if isinstance(e, URIRef) and not str(e).startswith(xsd)
+    }
+    assert class_endpoints, "expected at least one class endpoint in TTL"
+    undeclared = class_endpoints - class_nodes - {OWL.Thing}
+    assert not undeclared, f"endpoints not declared as owl:Class: {undeclared}"
+
+
+def test_raw_endpoint_types_survive_alignment():
+    # Property endpoints carry the raw entity type ("person") while class names
+    # are normalized ("Person"); a declared type must not be dropped from
+    # domain/range just because its spelling differs from the class name.
+    entities = [
+        {"type": "person", "text": "John"},
+        {"type": "person", "text": "Jane"},
+        {"type": "organization", "text": "Acme"},
+        {"type": "organization", "text": "Globex"},
+    ]
+    rels = [
+        {"type": "worksFor", "source": "John", "target": "Acme"},
+        {"type": "worksFor", "source": "Jane", "target": "Globex"},
+    ]
     result = bootstrap_schema(entities, rels)
-    ttl = result["ttl"]
-    for cls in result["ontology"].get("classes", []):
-        name = cls.get("name")
-        if name:
-            assert name in ttl, f"declared class {name} missing from TTL"
+    works_for = next(
+        p for p in result["ontology"]["properties"] if p["name"] == "worksFor"
+    )
+    assert "person" in works_for["domain"]
+    assert "organization" in works_for["range"]
 
 
 def test_per_call_min_occurrences_gates_classes_too():
