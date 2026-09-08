@@ -21,6 +21,37 @@ from .owl_generator import OWLGenerator
 logger = get_logger("bootstrap_schema")
 
 
+def _align_endpoints(ontology: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop property endpoints that never made it into ``classes``.
+
+    Class inference and predicate inference share a frequency gate, but a rare
+    endpoint type can still appear on a frequent relationship's property.  If we
+    left it in ``domain``/``range``, the emitted TTL would reference an undeclared
+    class and ``ExtractionSchema.from_ontology`` would fold the filtered type back
+    into its concept vocabulary, defeating the gate.  Unconstrained is the honest
+    reading of "did not clear the gate", so such endpoints become ``owl:Thing``.
+    """
+    declared = {
+        (c.get("name") or c.get("label"))
+        for c in ontology.get("classes", [])
+        if isinstance(c, dict)
+    }
+    declared.discard(None)
+    for prop in ontology.get("properties", []):
+        if not isinstance(prop, dict):
+            continue
+        for key in ("domain", "range"):
+            values = prop.get(key)
+            if not isinstance(values, list):
+                continue
+            prop[key] = [
+                v
+                for v in values
+                if not isinstance(v, str) or v in declared or v == "owl:Thing"
+            ] or ["owl:Thing"]
+    return ontology
+
+
 def bootstrap_schema(
     entities: List[Dict[str, Any]],
     relationships: List[Dict[str, Any]],
@@ -68,8 +99,14 @@ def bootstrap_schema(
         "relationships": relationships,
     }
     ontology = generator.generate_ontology(data, **gen_options)
+    ontology = _align_endpoints(ontology)
 
-    ttl = OWLGenerator().generate_owl(ontology, format="turtle")
+    # Serialize with the generator's own namespace manager so declared classes,
+    # properties and domain/range endpoints resolve under one consistent IRI
+    # scheme (a fresh OWLGenerator would mint a second, inconsistent set).
+    ttl = OWLGenerator(
+        namespace_manager=generator.namespace_manager
+    ).generate_owl(ontology, format="turtle")
 
     return {
         "ontology": ontology,
