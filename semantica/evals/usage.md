@@ -86,6 +86,36 @@ summary = evaluate(cases, ["decision_scores"])
 `llm_as_judge`; per-case or top-level `config` may carry per-evaluator settings
 (e.g. `config={"exact_match": {...}}`).
 
+## Repeated sampling for nondeterministic targets
+
+When your target is nondeterministic (LLM-backed extraction, agent pipeline),
+a single verdict says little about stability. `evaluate_repeated` reruns
+`target_fn` per case `n` times and aggregates per-evaluator statistics:
+
+```python
+from semantica.evals import evaluate_repeated
+
+summary = evaluate_repeated(
+    cases,                       # dict cases; tuple cases carry a static actual
+    evaluators=["exact_match"],
+    target_fn=pipeline_run,      # called once per run for a fresh `actual`
+    runs=10,
+)
+
+summary.cases[0].verdict          # "stable_pass" | "flaky" | "stable_fail" | "error"
+stat = summary.cases[0].stats["exact_match"]
+stat.pass_rate                    # passes / n, e.g. 0.8
+stat.any_passed                   # observed pass@n
+stat.all_passed                   # observed pass^n
+stat.mean_score, stat.stddev      # distribution over sampled scores
+```
+
+`target_fn` must be supplied and case `actual` must be left out: a case with a
+static `actual` (or the `(expected, actual)` tuple form) has nothing to sample
+and raises `ValueError` with `runs > 1`. Objective config applies per run as in
+`evaluate()`; the aggregate `pass_rate` is what you gate on upstream (e.g.
+require `stat.pass_rate >= 0.8`).
+
 ## Set per-evaluator objectives
 
 By default each evaluator decides its own pass/fail. To override that

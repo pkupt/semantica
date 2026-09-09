@@ -30,15 +30,19 @@ assert on in tests, or track across runs.
 | Name | Kind | Role |
 | :--- | :--- | :--- |
 | `evaluate(cases, evaluators, config=None, target_fn=None)` | function | Run named evaluators over each case, return an `EvalSummary` |
+| `evaluate_repeated(cases, evaluators, config=None, target_fn=None, runs=10)` | function | Rerun `target_fn` per case and aggregate stats, return a `RepeatedSummary` |
 | `list_evaluators()` | function | Sorted names of every registered evaluator |
 | `get_evaluator(name)` | function | Look up a single evaluator function by name |
 | `EvalMetric` | dataclass (frozen) | One evaluator's result: `score`, `passed`, `meta` |
 | `CaseResult` | namedtuple | One case's result: `case_id`, `status`, `metrics`, `details` |
 | `EvalSummary` | dataclass | Aggregate across cases: `total`, `passed`, `failed`, `errors`, `pass_rate`, `cases` |
+| `SampleStats` | dataclass (frozen) | Per-evaluator statistics over repeated runs: `n`, `passes`, `errors`, `pass_rate`, `mean_score`, `stddev`, `any_passed`, `all_passed`, `samples` |
+| `RepeatedCaseResult` | namedtuple | Repeated outcome for one case: `case_id`, `verdict`, `stats` |
+| `RepeatedSummary` | dataclass | Aggregate across repeated-sampled cases: `runs`, `stable_pass`, `flaky`, `stable_fail`, `errors`, `cases` |
 
 ```python
 import semantica.evals as evals
-from semantica.evals import evaluate, list_evaluators, get_evaluator
+from semantica.evals import evaluate, evaluate_repeated, list_evaluators, get_evaluator
 ```
 
 ## Built-in evaluators
@@ -207,6 +211,49 @@ for case in summary.cases:
 `EvalMetric` is frozen (`score: float`, `passed: bool`, `meta: dict`). `CaseResult`
 is a namedtuple, and `EvalSummary` is a plain dataclass, so all three are
 straightforward to serialize for logging or regression tracking.
+
+## Repeated sampling
+
+For nondeterministic targets (LLM-backed extraction, agent pipelines,
+sampling-based judges) a single verdict says little. `evaluate_repeated` reruns
+`target_fn` per case `n` times and aggregates per-evaluator statistics:
+
+```python
+from semantica.evals import evaluate_repeated
+
+summary = evaluate_repeated(
+    cases,                       # must be dict cases; see below
+    evaluators=["exact_match"],
+    target_fn=pipeline_run,      # called once per run to produce a fresh `actual`
+    runs=10,
+)
+
+summary.runs            # 10
+summary.cases[0].verdict  # "stable_pass" | "flaky" | "stable_fail" | "error"
+summary.cases[0].stats["exact_match"].pass_rate   # e.g. 0.8
+summary.cases[0].stats["exact_match"].stddev      # e.g. 0.13
+```
+
+Per-evaluator `SampleStats` carries `n`, `passes`, `errors`, `pass_rate`
+(`passes / n`), `mean_score`, `stddev`, and the derived booleans `any_passed`
+(observed pass@n) and `all_passed` (observed pass^n). Verdicts pool all samples:
+`stable_pass` when every run passed every evaluator, `stable_fail` when none
+passed, `flaky` when the pool mixes passes and fails, and `error` when a run
+errored.
+
+Requirements and edge cases:
+
+- Each case **must** be a dict. The `(expected, actual)` tuple form always
+  carries a static `actual`, which has nothing to sample; using it with
+  `runs > 1` raises `ValueError`.
+- A dict case that provides `actual` directly is likewise rejected when
+  `runs > 1`.
+- `target_fn` exceptions and evaluator failures become per-run error samples and
+  mark the case `error`; they never crash the run.
+- The objective layer applies per run as in `evaluate()`; the reported
+  `pass_rate` is the aggregate signal you gate on (e.g. require
+  `pass_rate >= 0.8` upstream).
+- `runs` must be `>= 1`.
 
 ## Notes
 
