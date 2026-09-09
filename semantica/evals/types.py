@@ -4,7 +4,7 @@ Defines the metric and result shapes produced by the evals module.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, NamedTuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,8 @@ class SampleStats:
 
     ``n`` is the number of runs, ``passes`` the number that passed, and the
     rest are derived views over those runs. ``samples`` keeps the raw metrics.
+    ``objective_passed`` is None unless a ``direction`` objective is configured,
+    in which case it gates the aggregate ``pass_rate`` with the same threshold.
     """
 
     n: int
@@ -53,10 +55,12 @@ class SampleStats:
     stddev: float
     any_passed: bool
     all_passed: bool
+    objective_passed: Optional[bool] = None
     samples: List[EvalMetric] = field(default_factory=list)
 
 
-class RepeatedCaseResult(NamedTuple):
+@dataclass(frozen=True)
+class RepeatedCaseResult:
     """Per-case outcome after repeated sampling.
 
     ``verdict`` classifies the case across runs:

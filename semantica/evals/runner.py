@@ -253,13 +253,22 @@ def evaluate_repeated(
     ``flaky`` when the pool mixes passes and fails (e.g. one evaluator passing
     every run while another passes none).
 
-    A case that carries a static ``actual`` (rather than a ``target_fn``) has
-    nothing to sample, so with ``runs > 1`` it raises ``ValueError``, matching
-    the fail-fast style of invalid objective config. ``evaluate()`` is untouched;
-    this is an additive entry point over the same helpers.
+    A case that carries a non-null static ``actual`` (rather than a ``target_fn``)
+    has nothing to sample, so with ``runs > 1`` it raises ``ValueError``, matching
+    the fail-fast style of invalid objective config. An ``actual`` of ``None`` is
+    treated as absent, exactly as in ``evaluate()``: it falls back to the
+    resolver. ``evaluate()`` is untouched; this is an additive entry point over
+    the same helpers.
     """
     if runs < 1:
         raise ValueError(f"runs must be >= 1 (got {runs!r})")
+    if not evaluators:
+        raise ValueError("evaluate_repeated requires at least one evaluator")
+    if len(evaluators) != len(set(evaluators)):
+        raise ValueError(
+            f"evaluators must be unique (got duplicates: "
+            f"{sorted({n for n in evaluators if evaluators.count(n) > 1})})"
+        )
     default_config = config or {}
     repeated_results: List[RepeatedCaseResult] = []
 
@@ -269,9 +278,8 @@ def evaluate_repeated(
     # which case carries it.
     pre_resolved = []
     for case in cases:
-        _, _, static_actual, case_config, _ = _extract(case, target_fn)
+        case_id, _, static_actual, case_config, _ = _extract(case, target_fn)
         if static_actual is not None and runs > 1:
-            case_id, *_ = _extract(case, target_fn)
             raise ValueError(
                 f"case '{case_id}': repeated sampling requires a streaming "
                 f"``target_fn``; a static ``actual`` can only be run once "
@@ -300,15 +308,12 @@ def evaluate_repeated(
         errored_any = False
         for _ in range(runs):
             if not has_actual and resolver is None:
-                per_eval_round: Dict[str, EvalMetric] = {}
                 for name in evaluators:
-                    per_eval_round[name] = EvalMetric(
-                        0.0, False, {"error": "no target_fn to sample"}
+                    per_eval[name].append(
+                        EvalMetric(0.0, False, {"error": "no target_fn to sample"})
                     )
                 errored_any = True
-                for name in evaluators:
-                    per_eval[name].append(per_eval_round[name])
-                break
+                continue
             try:
                 actual = static_actual if has_actual else resolver(case)
             except Exception as exc:  # noqa: BLE001
@@ -346,6 +351,12 @@ def evaluate_repeated(
             scores = [m.score for m in samples if "error" not in m.meta]
             pass_rate = passes / n if n else 0.0
             mean_score = sum(scores) / len(scores) if scores else 0.0
+            objective = objective_by_name.get(name)
+            objective_passed = None
+            if objective is not None and "direction" in objective:
+                objective_passed = _apply_objective(
+                    EvalMetric(pass_rate, True), objective
+                )
             stats[name] = SampleStats(
                 n=n,
                 passes=passes,
@@ -355,6 +366,7 @@ def evaluate_repeated(
                 stddev=_stddev(scores),
                 any_passed=passes > 0,
                 all_passed=passes == n and n > 0 and errors == 0,
+                objective_passed=objective_passed,
                 samples=samples,
             )
         if verdict is None:
