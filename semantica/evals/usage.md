@@ -96,7 +96,7 @@ a single verdict says little about stability. `evaluate_repeated` reruns
 from semantica.evals import evaluate_repeated
 
 summary = evaluate_repeated(
-    cases,                       # dict cases; tuple cases carry a static actual
+    cases,                       # dict or (expected, actual) tuple cases
     evaluators=["exact_match"],
     target_fn=pipeline_run,      # called once per run for a fresh `actual`
     runs=10,
@@ -111,10 +111,12 @@ stat.mean_score, stat.stddev      # distribution over sampled scores
 ```
 
 `target_fn` must be supplied and case `actual` must be left out: a case with a
-static `actual` (or the `(expected, actual)` tuple form) has nothing to sample
-and raises `ValueError` with `runs > 1`. Objective config applies per run as in
-`evaluate()`; the aggregate `pass_rate` is what you gate on upstream (e.g.
-require `stat.pass_rate >= 0.8`).
+non-null static `actual` (rather than a `target_fn`) has nothing to sample and
+raises `ValueError` with `runs > 1`. An `actual` of `None` is treated as absent,
+matching `evaluate()`, so it falls back to the resolver. Objective config applies
+per run as in `evaluate()` and the same objective gates the aggregate pass rate:
+`stat.objective_passed` reports `pass_rate >= 0.8` for a
+`{direction: maximize, threshold: 0.8}` objective.
 
 ## Set per-evaluator objectives
 

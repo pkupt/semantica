@@ -36,8 +36,8 @@ assert on in tests, or track across runs.
 | `EvalMetric` | dataclass (frozen) | One evaluator's result: `score`, `passed`, `meta` |
 | `CaseResult` | namedtuple | One case's result: `case_id`, `status`, `metrics`, `details` |
 | `EvalSummary` | dataclass | Aggregate across cases: `total`, `passed`, `failed`, `errors`, `pass_rate`, `cases` |
-| `SampleStats` | dataclass (frozen) | Per-evaluator statistics over repeated runs: `n`, `passes`, `errors`, `pass_rate`, `mean_score`, `stddev`, `any_passed`, `all_passed`, `samples` |
-| `RepeatedCaseResult` | namedtuple | Repeated outcome for one case: `case_id`, `verdict`, `stats` |
+| `SampleStats` | dataclass (frozen) | Per-evaluator statistics over repeated runs: `n`, `passes`, `errors`, `pass_rate`, `mean_score`, `stddev`, `any_passed`, `all_passed`, `objective_passed`, `samples` |
+| `RepeatedCaseResult` | dataclass (frozen) | Repeated outcome for one case: `case_id`, `verdict`, `stats` |
 | `RepeatedSummary` | dataclass | Aggregate across repeated-sampled cases: `runs`, `stable_pass`, `flaky`, `stable_fail`, `errors`, `cases` |
 
 ```python
@@ -208,8 +208,9 @@ for case in summary.cases:
         print(metric.meta.get("reasons", {}))  # per-sub-check failure reasons
 ```
 
-`EvalMetric` is frozen (`score: float`, `passed: bool`, `meta: dict`). `CaseResult`
-is a namedtuple, and `EvalSummary` is a plain dataclass, so all three are
+`EvalMetric`, `SampleStats`, and `RepeatedCaseResult` are frozen dataclasses
+(`score: float`, `passed: bool`, `meta: dict`, ...). `CaseResult` is a
+namedtuple and the `*Summary` classes are plain dataclasses, so all are
 straightforward to serialize for logging or regression tracking.
 
 ## Repeated sampling
@@ -243,16 +244,16 @@ errored.
 
 Requirements and edge cases:
 
-- Each case **must** be a dict. The `(expected, actual)` tuple form always
-  carries a static `actual`, which has nothing to sample; using it with
-  `runs > 1` raises `ValueError`.
-- A dict case that provides `actual` directly is likewise rejected when
-  `runs > 1`.
+- Each case can be a dict or a `(expected, actual)` tuple, matching `evaluate()`.
+  A case that carries a **non-null** static `actual` has nothing to sample; using
+  it with `runs > 1` raises `ValueError`. An `actual` of `None` is treated as
+  absent, so it falls back to the resolver exactly as in `evaluate()`.
 - `target_fn` exceptions and evaluator failures become per-run error samples and
   mark the case `error`; they never crash the run.
-- The objective layer applies per run as in `evaluate()`; the reported
-  `pass_rate` is the aggregate signal you gate on (e.g. require
-  `pass_rate >= 0.8` upstream).
+- The objective layer applies per run as in `evaluate()`, and the same objective
+  gates the aggregate `pass_rate` through `SampleStats.objective_passed` (e.g.
+  `{direction: maximize, threshold: 0.8}` requires an 80% pass rate across runs).
+- At least one evaluator is required, and evaluator names must be unique.
 - `runs` must be `>= 1`.
 
 ## Notes
