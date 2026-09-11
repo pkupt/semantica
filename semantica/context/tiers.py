@@ -44,6 +44,7 @@ Example:
     True
 """
 
+import math
 from enum import Enum
 from typing import Any, Iterable, Optional
 
@@ -299,16 +300,24 @@ class TierCalculator:
             return 0
         try:
             count = int(corroboration_count)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
         return max(0, count)
 
     def _is_usable_confidence(self, confidence: Optional[float]) -> bool:
-        """Return whether confidence is numeric and at least min_confidence."""
+        """Return whether confidence is a finite number at least
+        min_confidence.
+
+        Non-finite values (positive or negative infinity) are not real
+        measurements, so they count as unusable rather than earning the top
+        tier through the lower-bound comparison alone.
+        """
         if confidence is None:
             return False
         try:
             value = float(confidence)
         except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value):
             return False
         return value >= self.min_confidence

@@ -142,6 +142,27 @@ class TestInputHandling(unittest.TestCase):
         tier = self.calculator.calculate(2, float("nan"))
         self.assertIs(tier, TrustTier.SILVER)
 
+    def test_infinite_confidence_downgrades(self):
+        self.assertIs(
+            self.calculator.calculate(2, float("inf")), TrustTier.SILVER
+        )
+        self.assertIs(
+            self.calculator.calculate(2, float("-inf")), TrustTier.SILVER
+        )
+
+    def test_infinite_count_is_treated_as_zero(self):
+        self.assertIs(
+            self.calculator.calculate(float("inf"), 0.9), TrustTier.BRONZE
+        )
+        self.assertIs(
+            self.calculator.calculate(float("-inf"), 0.9), TrustTier.BRONZE
+        )
+
+    def test_nan_count_is_treated_as_zero(self):
+        self.assertIs(
+            self.calculator.calculate(float("nan"), 0.5), TrustTier.QUARANTINE
+        )
+
     def test_confidence_above_one_is_still_usable(self):
         self.assertIs(self.calculator.calculate(2, 1.4), TrustTier.GOLD)
 
