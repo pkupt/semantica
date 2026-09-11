@@ -247,6 +247,10 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "SalesforceIngestor": (".salesforce_ingestor", "SalesforceIngestor"),
     "SalesforceData": (".salesforce_ingestor", "SalesforceData"),
     "SalesforceConnector": (".salesforce_ingestor", "SalesforceConnector"),
+    # dbt ingestion
+    "DbtIngestor": (".dbt_ingestor", "DbtIngestor"),
+    "DbtData": (".dbt_ingestor", "DbtData"),
+    "DbtConnector": (".dbt_ingestor", "DbtConnector"),
 }
 
 _OPTIONAL_DEPENDENCY_MESSAGES = {
@@ -288,6 +292,11 @@ _OPTIONAL_DEPENDENCY_MESSAGES = {
     ".salesforce_ingestor": (
         "Salesforce ingestion requires optional dependency 'simple-salesforce'. "
         "Install it with: pip install 'semantica[db-salesforce]'"
+    ),
+    ".dbt_ingestor": (
+        "dbt ingestion requires optional dependency 'requests'. "
+        "Install it before importing DbtIngestor or using ingest_dbt(). "
+        "Install it with: pip install 'semantica[ingest-dbt]'"
     ),
 }
 
@@ -345,6 +354,15 @@ def __getattr__(name: str) -> Any:
         "SalesforceConnector",
     }:
         if not getattr(module, "SALESFORCE_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".dbt_ingestor" and name in {
+        "DbtIngestor",
+        "DbtConnector",
+    }:
+        if not getattr(module, "REQUESTS_AVAILABLE", True):
             message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
             if message:
                 raise ImportError(message)
@@ -439,6 +457,10 @@ __all__ = [
     "SalesforceIngestor",
     "SalesforceData",
     "SalesforceConnector",
+    # dbt ingestion
+    "DbtIngestor",
+    "DbtData",
+    "DbtConnector",
     # Registry and Methods
     "MethodRegistry",
     "method_registry",
