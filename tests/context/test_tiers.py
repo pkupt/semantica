@@ -2,9 +2,9 @@
 Unit tests for trust tiers (semantica.context.tiers).
 
 Covers tier ordering, the corroboration-led thresholds, the degradation rules
-for missing or unusable confidence, and the tolerance for messy inputs.
+for missing or unusable confidence, the placeholder confidence values that
+count as absent, and the tolerance for messy inputs.
 """
-
 import json
 import os
 import sys
@@ -176,6 +176,64 @@ class TestMetadataFriendly(unittest.TestCase):
         tier = TierCalculator().calculate(3, 0.9)
         payload = json.dumps({"trust_tier": tier.value})
         self.assertEqual(payload, '{"trust_tier": "gold"}')
+
+
+class TestTreatAsMissing(unittest.TestCase):
+    """Placeholder confidence is handled as absent, not as a perfect score."""
+
+    def setUp(self):
+        self.calculator = TierCalculator()
+
+    def test_answer_placeholder_cannot_earn_gold(self):
+        for count in (2, 5, 50):
+            self.assertIsNot(
+                self.calculator.calculate(count, 1.0), TrustTier.GOLD
+            )
+
+    def test_answer_placeholder_downgrades_gold(self):
+        self.assertIs(self.calculator.calculate(2, 1.0), TrustTier.SILVER)
+
+    def test_integer_one_is_also_a_placeholder(self):
+        # The dataclass default can arrive as int 1 depending on the source.
+        self.assertIs(self.calculator.calculate(2, 1), TrustTier.SILVER)
+
+    def test_placeholder_without_corroboration_is_quarantine(self):
+        self.assertIs(self.calculator.calculate(0, 1.0), TrustTier.QUARANTINE)
+
+    def test_earned_confidence_is_not_treated_as_missing(self):
+        # 0.9 is the value the issue discusses; the repo default is 1.0, so
+        # 0.9 stays usable unless it is configured as a placeholder.
+        self.assertIs(self.calculator.calculate(2, 0.9), TrustTier.GOLD)
+
+    def test_default_placeholder_is_exposed(self):
+        self.assertEqual(self.calculator.treat_as_missing, frozenset({1.0}))
+
+    def test_substitution_can_be_disabled(self):
+        calculator = TierCalculator(treat_as_missing=())
+        self.assertIs(calculator.calculate(2, 1.0), TrustTier.GOLD)
+
+    def test_additional_placeholders_can_be_configured(self):
+        calculator = TierCalculator(treat_as_missing=[0.9, 1.0])
+        self.assertIs(calculator.calculate(2, 0.9), TrustTier.SILVER)
+        self.assertIs(calculator.calculate(2, 1.0), TrustTier.SILVER)
+        self.assertIs(calculator.calculate(2, 0.95), TrustTier.GOLD)
+
+    def test_degradation_flag_applies_to_placeholders(self):
+        calculator = TierCalculator(missing_confidence_degrades=False)
+        self.assertIs(calculator.calculate(2, 1.0), TrustTier.GOLD)
+        self.assertIs(calculator.calculate(0, 1.0), TrustTier.QUARANTINE)
+
+    def test_placeholder_outside_probability_range_is_rejected(self):
+        with self.assertRaises(ValueError):
+            TierCalculator(treat_as_missing=[1.5])
+
+    def test_non_numeric_placeholder_is_rejected(self):
+        with self.assertRaises(ValueError):
+            TierCalculator(treat_as_missing=["high"])
+
+    def test_non_iterable_placeholder_is_rejected(self):
+        with self.assertRaises(TypeError):
+            TierCalculator(treat_as_missing=1.0)
 
 
 if __name__ == "__main__":
