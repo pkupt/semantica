@@ -251,6 +251,10 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "RedshiftIngestor": (".redshift_ingestor", "RedshiftIngestor"),
     "RedshiftData": (".redshift_ingestor", "RedshiftData"),
     "RedshiftConnector": (".redshift_ingestor", "RedshiftConnector"),
+    # Power BI ingestion
+    "PowerBIIngestor": (".powerbi_ingestor", "PowerBIIngestor"),
+    "PowerBIData": (".powerbi_ingestor", "PowerBIData"),
+    "PowerBIConnector": (".powerbi_ingestor", "PowerBIConnector"),
 }
 
 _OPTIONAL_DEPENDENCY_MESSAGES = {
@@ -296,6 +300,10 @@ _OPTIONAL_DEPENDENCY_MESSAGES = {
     ".redshift_ingestor": (
         "Redshift ingestion requires optional dependency 'redshift-connector'. "
         "Install it with: pip install 'semantica[db-redshift]'"
+    ),
+    ".powerbi_ingestor": (
+        "Power BI ingestion requires optional dependency 'requests'. "
+        "Install it with: pip install 'semantica[ingest-powerbi]'"
     ),
 }
 
@@ -369,6 +377,15 @@ def __getattr__(name: str) -> Any:
         "RedshiftConnector",
     }:
         if not getattr(module, "REDSHIFT_AVAILABLE", True):
+            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
+            if message:
+                raise ImportError(message)
+
+    if module_name == ".powerbi_ingestor" and name in {
+        "PowerBIIngestor",
+        "PowerBIConnector",
+    }:
+        if not getattr(module, "REQUESTS_AVAILABLE", True):
             message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
             if message:
                 raise ImportError(message)
@@ -467,6 +484,10 @@ __all__ = [
     "RedshiftIngestor",
     "RedshiftData",
     "RedshiftConnector",
+    # Power BI ingestion
+    "PowerBIIngestor",
+    "PowerBIData",
+    "PowerBIConnector",
     # Registry and Methods
     "MethodRegistry",
     "method_registry",
