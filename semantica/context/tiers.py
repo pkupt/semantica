@@ -30,8 +30,9 @@ Algorithms Used:
 Tiers:
 
     - gold: multiple independent sources plus usable confidence.
-    - silver: partial support, a single source or absent/low confidence.
-    - bronze: thin support, a single weak piece of evidence.
+    - silver: partial support, a single source, or a higher band pulled down
+      by absent or low confidence.
+    - bronze: no corroboration at all, held up only by usable confidence.
     - quarantine: no corroboration and no usable confidence; needs review.
 
 Example:
