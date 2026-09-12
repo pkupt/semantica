@@ -71,12 +71,18 @@ def _parse_objective(name, eval_config):
             raise ValueError(
                 f"objective for '{name}': 'minimize' requires a 'threshold'"
             )
-        return {"direction": "minimize", "threshold": _coerce_threshold(name, threshold)}
+        return {
+            "direction": "minimize",
+            "threshold": _coerce_threshold(name, threshold),
+        }
     if direction == "maximize":
         if threshold is None:
             # no bar to re-decide against; treat as absent (evaluator default stands)
             return None
-        return {"direction": "maximize", "threshold": _coerce_threshold(name, threshold)}
+        return {
+            "direction": "maximize",
+            "threshold": _coerce_threshold(name, threshold),
+        }
     raise ValueError(
         f"objective for '{name}': 'direction' must be 'maximize' or 'minimize' "
         f"(got {direction!r})"
@@ -105,7 +111,9 @@ def _extract(case: Case, target_fn: Optional[Callable]):
     return case_id, expected, actual, config, per_fn
 
 
-def _merge_config(default_config: Dict[str, Any], case_config: Dict[str, Any]) -> Dict[str, Any]:
+def _merge_config(
+    default_config: Dict[str, Any], case_config: Dict[str, Any]
+) -> Dict[str, Any]:
     """Deep-merge per-case config over the global config (two levels deep).
 
     Level 1 (top-level keys, e.g. evaluator names): merged key-by-key so a
@@ -192,7 +200,9 @@ def evaluate(
                 metric = get_evaluator(name)(actual, expected, config=eval_config)
                 objective = objective_by_name.get(name)
                 if objective is not None and "error" not in metric.meta:
-                    metric = EvalMetric(metric.score, _apply_objective(metric, objective), metric.meta)
+                    metric = EvalMetric(
+                        metric.score, _apply_objective(metric, objective), metric.meta
+                    )
                 metrics[name] = metric
                 if "error" in metric.meta:
                     errored = True
@@ -213,7 +223,11 @@ def evaluate(
     errors = sum(1 for c in case_results if c.status == "error")
     pass_rate = (passed / total) if total else 1.0
     return EvalSummary(
-        total, passed, failed, errors, pass_rate,
+        total,
+        passed,
+        failed,
+        errors,
+        pass_rate,
         cases=case_results,
     )
 

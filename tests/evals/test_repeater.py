@@ -1,6 +1,7 @@
 """Tests for ``evaluate_repeated`` (repeated-sampling evaluation)."""
 
 import math
+
 import pytest
 
 from semantica.evals import (
@@ -12,13 +13,13 @@ from semantica.evals import (
 from semantica.evals.registry import EVALUATORS, register
 from semantica.evals.types import EvalMetric
 
-
 CALLS = {"n": 0}
 
 
 @pytest.fixture
 def grade_linear():
     """Register a graded evaluator for the mean/stddev test, then remove it."""
+
     @register("_grade_linear")
     def _grade_linear(actual, expected=None, config=None, **kwargs):
         return EvalMetric(score=float(actual), passed=float(actual) >= 0.0)
@@ -60,6 +61,7 @@ def _reset():
 
 def test_exports():
     from semantica.evals import evaluate, evaluate_repeated
+
     assert callable(evaluate) and callable(evaluate_repeated)
 
 
@@ -168,9 +170,7 @@ def test_target_fn_exception_becomes_error_verdict():
     # every errored sample carries the target_fn failure message
     stat = result.stats["exact_match"]
     assert stat.errors == 5
-    assert all(
-        m.meta.get("error", "").startswith("target_fn:") for m in stat.samples
-    )
+    assert all(m.meta.get("error", "").startswith("target_fn:") for m in stat.samples)
 
 
 def test_error_takes_precedence_over_flaky():
