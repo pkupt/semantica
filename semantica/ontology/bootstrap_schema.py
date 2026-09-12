@@ -110,9 +110,9 @@ def bootstrap_schema(
     # Serialize with the generator's own namespace manager so declared classes,
     # properties and domain/range endpoints resolve under one consistent IRI
     # scheme (a fresh OWLGenerator would mint a second, inconsistent set).
-    ttl = OWLGenerator(
-        namespace_manager=generator.namespace_manager
-    ).generate_owl(ontology, format="turtle")
+    ttl = OWLGenerator(namespace_manager=generator.namespace_manager).generate_owl(
+        ontology, format="turtle"
+    )
 
     return {
         "ontology": ontology,

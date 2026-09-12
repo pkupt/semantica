@@ -110,9 +110,9 @@ def test_owl_thing_serializes_as_standard_owl_iri():
     result = bootstrap_schema(entities, rels)
     # The standard OWL term must appear (rdflib writes it as the qname prefix),
     # and the ontology must not mint a local Thing class under its own base.
-    assert "owl:Thing" in result["ttl"], (
-        "owl:Thing must serialize to the standard OWL term"
-    )
+    assert (
+        "owl:Thing" in result["ttl"]
+    ), "owl:Thing must serialize to the standard OWL term"
     assert "class/Thing" not in result["ttl"]
     from rdflib import Graph, Namespace
     from rdflib.namespace import OWL
@@ -156,9 +156,7 @@ def test_ttl_iris_consistent_with_declared_classes():
     result = bootstrap_schema(entities, rels, use_speaking_iris=False)
     g = Graph().parse(data=result["ttl"], format="turtle")
     class_nodes = set(g.subjects(RDF.type, OWL.Class))
-    endpoints = set(g.objects(None, RDFS.domain)) | set(
-        g.objects(None, RDFS.range)
-    )
+    endpoints = set(g.objects(None, RDFS.domain)) | set(g.objects(None, RDFS.range))
     # xsd datatypes may appear as ranges of data properties; only class-like
     # URIRef endpoints must be declared.
     from rdflib import URIRef
@@ -166,9 +164,7 @@ def test_ttl_iris_consistent_with_declared_classes():
 
     xsd = str(XSD)
     class_endpoints = {
-        e
-        for e in endpoints
-        if isinstance(e, URIRef) and not str(e).startswith(xsd)
+        e for e in endpoints if isinstance(e, URIRef) and not str(e).startswith(xsd)
     }
     assert class_endpoints, "expected at least one class endpoint in TTL"
     undeclared = class_endpoints - class_nodes - {OWL.Thing}
