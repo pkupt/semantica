@@ -6,12 +6,7 @@ for missing or unusable confidence, the placeholder confidence values that
 count as absent, and the tolerance for messy inputs.
 """
 import json
-import os
-import sys
 import unittest
-
-_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
-sys.path.append(_ROOT)
 
 from semantica.context.tiers import TierCalculator, TrustTier
 
