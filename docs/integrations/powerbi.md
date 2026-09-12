@@ -14,7 +14,7 @@ icon: "chart-simple"
 pip install "semantica[ingest-powerbi]"
 
 # Or install the dependency separately
-pip install requests>=2.28.0
+pip install "requests>=2.28.0"
 ```
 
 `requests` is an optional dependency. A plain `pip install semantica` never pulls it in, and `import semantica.ingest` never loads it eagerly.
@@ -65,13 +65,13 @@ Missing any of the first three raises `ValidationError` before any network call 
 
 ## Scoping to One Workspace
 
-Pass a workspace (group) ID to read a single workspace; omit it to list every workspace the service principal can see.
+Pass a workspace (group) ID to read a single workspace; omit it to walk every workspace the service principal can see, collecting datasets, reports and dataflows from each and tagging every record with the `workspace_id` it came from. That per-workspace walk is deliberate: the unscoped `myorg` endpoints only cover My workspace, and dataflows have no unscoped endpoint.
 
 ```python
 data = ingestor.ingest_workspace_metadata(workspace_id="00000000-0000-0000-0000-000000000000")
 ```
 
-Select only the resources you need with `include`:
+Select only the resources you need with `include` (an empty list pulls nothing):
 
 ```python
 data = ingestor.ingest_workspace_metadata(include=["datasets", "reports"])

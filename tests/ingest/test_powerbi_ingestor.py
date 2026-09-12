@@ -5,11 +5,8 @@ ingestor module.  Tests assert on the *call signature* (method first, url
 second) so a mistake in argument order fails here instead of at runtime.
 """
 
-import sys
 import unittest
 from unittest.mock import patch
-
-sys.path.insert(0, r"D:\Vaults\Projects\semantica-1572")
 
 from semantica.ingest import powerbi_ingestor as pbi  # noqa: E402
 from semantica.ingest.powerbi_ingestor import (  # noqa: E402
@@ -157,7 +154,10 @@ class TestApiCalls(unittest.TestCase):
         self.assertEqual(result, {"id": "ws-9", "name": "Only"})
 
     def test_pagination_follows_next_link(self):
-        first = {"value": [{"id": "a"}], "@odata.nextLink": "https://next/1"}
+        first = {
+            "value": [{"id": "a"}],
+            "@odata.nextLink": "https://api.powerbi.com/v1.0/myorg/datasets?skip=1",
+        }
         second = {"value": [{"id": "b"}]}
         with patch(GUARD) as guard:
             guard.side_effect = [
@@ -168,6 +168,17 @@ class TestApiCalls(unittest.TestCase):
             result = self.connector.get("datasets")
         self.assertEqual([item["id"] for item in result], ["a", "b"])
         self.assertEqual(guard.call_count, 3)
+
+    def test_pagination_rejects_cross_origin_next_link(self):
+        first = {
+            "value": [{"id": "a"}],
+            "@odata.nextLink": "https://evil.example.com/next",
+        }
+        with patch(GUARD) as guard:
+            guard.side_effect = [token_response(), FakeResponse(first)]
+            with self.assertRaises(Exception):
+                self.connector.get("datasets")
+        self.assertEqual(guard.call_count, 2)  # token + first page only
 
     def test_workspace_scoped_paths(self):
         with patch(GUARD) as guard:
@@ -242,11 +253,57 @@ class TestIngestor(unittest.TestCase):
     def test_include_subset_skips_unwanted_calls(self):
         self.guard.side_effect = [
             token_response(),
+            FakeResponse({"value": [{"id": "ws-1", "name": "Sales"}]}),
             FakeResponse({"value": [{"id": "ds-1", "name": "Orders"}]}),
         ]
         data = self.ingestor.ingest_workspace_metadata(include=["datasets"])
         self.assertEqual(len(data.datasets), 1)
         self.assertEqual(data.workspaces, [])
+        self.assertEqual(data.reports, [])
+        self.assertEqual(data.dataflows, [])
+
+    def test_empty_include_pulls_nothing(self):
+        self.guard.side_effect = [token_response()]
+        data = self.ingestor.ingest_workspace_metadata(include=[])
+        self.assertEqual(data.workspaces, [])
+        self.assertEqual(data.datasets, [])
+        self.assertEqual(data.reports, [])
+        self.assertEqual(data.dataflows, [])
+        self.assertEqual(self.guard.call_count, 0)  # not even a token fetch
+
+    def test_unscoped_ingest_walks_each_workspace(self):
+        self.guard.side_effect = [
+            token_response(),
+            FakeResponse({"value": [{"id": "ws-1"}, {"id": "ws-2"}]}),
+            FakeResponse({"value": [{"id": "ds-1"}]}),
+            FakeResponse({"value": [{"id": "rp-1"}]}),
+            FakeResponse({"value": [{"id": "df-1"}]}),
+            FakeResponse({"value": [{"id": "ds-2"}]}),
+            FakeResponse({"value": [{"id": "rp-2"}]}),
+            FakeResponse({"value": [{"id": "df-2"}]}),
+        ]
+        data = self.ingestor.ingest_workspace_metadata()
+        self.assertEqual([d["id"] for d in data.datasets], ["ds-1", "ds-2"])
+        self.assertEqual(data.datasets[0]["workspace_id"], "ws-1")
+        self.assertEqual(data.dataflows[1]["workspace_id"], "ws-2")
+        urls = [call.args[1] for call in self.guard.call_args_list[1:]]
+        self.assertIn("https://api.powerbi.com/v1.0/myorg/groups/ws-1/dataflows", urls)
+        self.assertIn("https://api.powerbi.com/v1.0/myorg/groups/ws-2/dataflows", urls)
+
+    def test_scoped_ingest_uses_group_paths(self):
+        self.guard.side_effect = [
+            token_response(),
+            FakeResponse({"id": "ws-9", "name": "Only"}),
+            FakeResponse({"value": [{"id": "ds-9"}]}),
+            FakeResponse({"value": []}),
+            FakeResponse({"value": []}),
+        ]
+        data = self.ingestor.ingest_workspace_metadata(workspace_id="ws-9")
+        self.assertEqual(len(data.workspaces), 1)
+        self.assertEqual([d["id"] for d in data.datasets], ["ds-9"])
+        urls = [call.args[1] for call in self.guard.call_args_list[1:]]
+        self.assertIn("https://api.powerbi.com/v1.0/myorg/groups/ws-9/datasets", urls)
+        self.assertIn("https://api.powerbi.com/v1.0/myorg/groups/ws-9/dataflows", urls)
 
     def test_unknown_include_raises(self):
         with self.assertRaises(Exception):

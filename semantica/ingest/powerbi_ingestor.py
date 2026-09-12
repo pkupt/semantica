@@ -61,6 +61,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import urlparse
 
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
@@ -107,6 +108,18 @@ _DEFAULT_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 _RESOURCE_KEYS = ("workspaces", "datasets", "reports", "dataflows")
 
 _logger = get_logger("powerbi_ingestor")
+
+
+def _origin(url: str) -> tuple:
+    """Return the ``(scheme, host, effective port)`` triple for *url*.
+
+    Used to keep pagination on one origin: every hop re-sends the bearer
+    token, so a next link must not be allowed to move it elsewhere.
+    """
+    parsed = urlparse(url or "")
+    scheme = (parsed.scheme or "").lower()
+    default_port = 443 if scheme == "https" else 80
+    return scheme, (parsed.hostname or "").lower(), parsed.port or default_port
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +354,10 @@ class PowerBIConnector:
         """Join *path* onto the configured API base."""
         return f"{self.api_base}/{path.lstrip('/')}"
 
+    def _same_origin(self, url: str) -> bool:
+        """True when *url* shares the origin of the configured API base."""
+        return _origin(url) == _origin(self.api_base)
+
     def get(
         self,
         path: str,
@@ -396,7 +413,14 @@ class PowerBIConnector:
                 if "value" in body:
                     saw_value = True
                     items.extend(body.get("value") or [])
-                    url = body.get("@odata.nextLink") or ""
+                    next_url = body.get("@odata.nextLink") or ""
+                    if next_url and not self._same_origin(next_url):
+                        raise ProcessingError(
+                            f"Power BI pagination for '{path}' returned a next "
+                            f"link on another origin ({_origin(next_url)[1]}); "
+                            "refusing to send the access token there."
+                        )
+                    url = next_url
                 else:
                     return body
             else:
@@ -557,6 +581,16 @@ class PowerBIIngestor:
     # Ingestion
     # ------------------------------------------------------------------
 
+    def _fetch_child(
+        self, resource: str, workspace_id: Optional[str]
+    ) -> List[Dict[str, Any]]:
+        """Call the connector helper matching *resource* for one workspace."""
+        if resource == "datasets":
+            return self.connector.get_datasets(workspace_id)
+        if resource == "reports":
+            return self.connector.get_reports(workspace_id)
+        return self.connector.get_dataflows(workspace_id)
+
     def ingest_workspace_metadata(
         self,
         workspace_id: Optional[str] = None,
@@ -567,9 +601,12 @@ class PowerBIIngestor:
         Args:
             workspace_id: Workspace (group) to read. Defaults to the
                 connector's configured workspace; when that is unset the
-                workspaces themselves are listed instead.
+                workspaces themselves are listed and datasets, reports and
+                dataflows are collected across each of them, each record
+                tagged with the ``workspace_id`` it came from.
             include: Subset of ``("workspaces", "datasets", "reports",
-                "dataflows")`` to pull. Defaults to all four.
+                "dataflows")`` to pull. Defaults to all four; pass an empty
+                sequence to pull nothing.
 
         Returns:
             :class:`PowerBIData` with the requested collections populated.
@@ -578,7 +615,7 @@ class PowerBIIngestor:
             ValidationError: If *include* names an unknown resource.
             ProcessingError: If any API call fails.
         """
-        wanted = tuple(include) if include else _RESOURCE_KEYS
+        wanted = _RESOURCE_KEYS if include is None else tuple(include)
         unknown = [name for name in wanted if name not in _RESOURCE_KEYS]
         if unknown:
             raise ValidationError(
@@ -596,21 +633,40 @@ class PowerBIIngestor:
         collected: Dict[str, List[Dict[str, Any]]] = {key: [] for key in _RESOURCE_KEYS}
 
         try:
+            scope = workspace_id or self.connector.workspace_id
+
             if "workspaces" in wanted:
-                if workspace_id or self.connector.workspace_id:
+                if scope:
                     # A single workspace was requested — describe just it.
-                    target = workspace_id or self.connector.workspace_id
-                    workspace = self.connector.get(f"groups/{target}")
+                    workspace = self.connector.get(f"groups/{scope}")
                     collected["workspaces"] = [workspace] if workspace else []
                 else:
                     collected["workspaces"] = self.connector.get_workspaces()
 
-            if "datasets" in wanted:
-                collected["datasets"] = self.connector.get_datasets(workspace_id)
-            if "reports" in wanted:
-                collected["reports"] = self.connector.get_reports(workspace_id)
-            if "dataflows" in wanted:
-                collected["dataflows"] = self.connector.get_dataflows(workspace_id)
+            children = [k for k in ("datasets", "reports", "dataflows") if k in wanted]
+            if children:
+                if scope:
+                    for key in children:
+                        collected[key] = self._fetch_child(key, scope)
+                else:
+                    # With no workspace configured the unscoped endpoints only
+                    # cover "My workspace", and dataflows have no unscoped
+                    # endpoint at all. Walk the visible workspaces instead and
+                    # tag each record with the workspace it came from.
+                    workspaces = collected["workspaces"]
+                    if not workspaces and "workspaces" not in wanted:
+                        workspaces = self.connector.get_workspaces()
+                    for workspace in workspaces:
+                        if not isinstance(workspace, dict):
+                            continue
+                        group_id = workspace.get("id")
+                        if not group_id:
+                            continue
+                        for key in children:
+                            for item in self._fetch_child(key, group_id):
+                                if isinstance(item, dict):
+                                    item.setdefault("workspace_id", group_id)
+                                collected[key].append(item)
 
             data = PowerBIData(
                 workspaces=collected["workspaces"],
