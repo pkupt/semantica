@@ -8,8 +8,8 @@ second) so a mistake in argument order fails here instead of at runtime.
 import unittest
 from unittest.mock import patch
 
-from semantica.ingest import powerbi_ingestor as pbi  # noqa: E402
-from semantica.ingest.powerbi_ingestor import (  # noqa: E402
+from semantica.ingest import powerbi_ingestor as pbi
+from semantica.ingest.powerbi_ingestor import (
     PowerBIConnector,
     PowerBIData,
     PowerBIIngestor,
@@ -40,7 +40,7 @@ def token_response():
 
 
 class TestLazyExports(unittest.TestCase):
-    def test_classes_are_importable_without_requests(self):
+    def test_classes_are_module_level_attributes(self):
         self.assertTrue(hasattr(pbi, "PowerBIData"))
         self.assertTrue(hasattr(pbi, "PowerBIConnector"))
         self.assertTrue(hasattr(pbi, "PowerBIIngestor"))

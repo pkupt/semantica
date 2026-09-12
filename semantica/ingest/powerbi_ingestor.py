@@ -16,9 +16,8 @@ Three classes, matching the Snowflake/Salesforce/Redshift ingestors:
   ``ingested_at``).  No network dependency — always importable.
 
 - ``PowerBIConnector``: owns the Azure AD OAuth2 client-credentials token
-  lifecycle and the ``requests`` session.  Raises ``ImportError`` at
-  instantiation time when ``requests`` is absent, and ``ValidationError``
-  when the credentials are incomplete.  Every outbound call goes through
+  lifecycle and the ``requests`` session.  Raises ``ValidationError`` when
+  the credentials are incomplete.  Every outbound call goes through
   ``request_with_ssrf_guard``.
 
 - ``PowerBIIngestor``: orchestrates ingestion and exposes
@@ -43,15 +42,15 @@ Credentials may also come from the environment:
 
 The client secret is kept in a private attribute and is never logged.
 
-Optional dependency
--------------------
-Install before using ``PowerBIConnector`` or ``PowerBIIngestor``::
+Dependencies
+------------
+``requests`` is a core Semantica dependency, so no extra is needed::
 
-    pip install "semantica[ingest-powerbi]"
+    pip install semantica
 
-The top-level ``import semantica.ingest`` never imports ``requests``
-eagerly; it is loaded only when this module is first accessed through the
-lazy-export mechanism in ``__init__.py``.
+The module is registered as a lazy export in ``__init__.py``, so a
+top-level ``import semantica.ingest`` does not import it until one of the
+classes below is first accessed.
 """
 
 from __future__ import annotations
@@ -63,42 +62,18 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
+import requests
+
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
-
-# ---------------------------------------------------------------------------
-# Optional-dependency guard
-# ---------------------------------------------------------------------------
-# The module always imports cleanly.  The sentinel fires at instantiation
-# time so that:
-#   - ``from semantica.ingest import PowerBIData`` succeeds with no requests
-#   - ``from semantica.ingest import PowerBIIngestor`` succeeds (lazy)
-#   - ``PowerBIConnector(...)`` raises a clear ImportError when absent
-# ---------------------------------------------------------------------------
-try:
-    import requests
-
-    REQUESTS_AVAILABLE = True
-except (ImportError, OSError):  # pragma: no cover - depends on env
-    requests = None  # type: ignore[assignment]
-    REQUESTS_AVAILABLE = False
-
-try:
-    from .ssrf import request_with_ssrf_guard
-except (ImportError, OSError):  # pragma: no cover - defensive
-    request_with_ssrf_guard = None  # type: ignore[assignment]
+from .ssrf import request_with_ssrf_guard
 
 __all__ = [
     "PowerBIData",
     "PowerBIConnector",
     "PowerBIIngestor",
 ]
-
-_MISSING_EXTRA_HINT = (
-    "requests is required for the Power BI connector. "
-    "Install it with: pip install 'semantica[ingest-powerbi]'"
-)
 
 _DEFAULT_API_BASE = "https://api.powerbi.com/v1.0/myorg"
 _DEFAULT_TOKEN_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
@@ -212,14 +187,6 @@ class PowerBIConnector:
             ImportError: When ``requests`` is not installed.
             ValidationError: When required credentials are incomplete.
         """
-        if not REQUESTS_AVAILABLE:
-            raise ImportError(_MISSING_EXTRA_HINT)
-        if request_with_ssrf_guard is None:  # pragma: no cover - defensive
-            raise ImportError(
-                "Power BI ingestion requires the shared SSRF guard "
-                "(semantica.ingest.ssrf) to be importable."
-            )
-
         self.logger = _logger
 
         self.tenant_id = tenant_id or os.getenv("POWERBI_TENANT_ID")

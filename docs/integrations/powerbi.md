@@ -10,14 +10,10 @@ icon: "chart-simple"
 ## Installation
 
 ```bash
-# Install with Power BI support
-pip install "semantica[ingest-powerbi]"
-
-# Or install the dependency separately
-pip install "requests>=2.28.0"
+pip install semantica
 ```
 
-`requests` is an optional dependency. A plain `pip install semantica` never pulls it in, and `import semantica.ingest` never loads it eagerly.
+`requests` ships with Semantica as a core dependency, so this connector works as soon as the package is installed — there is no extra to install. The module is a lazy export: `import semantica.ingest` does not load it until you first touch `PowerBIIngestor`.
 
 <Note>
 This connector reads **metadata** — workspaces, datasets, reports and dataflows. It does not execute DAX queries or export dataset rows; the Power BI REST API exposes catalog information, not table data.

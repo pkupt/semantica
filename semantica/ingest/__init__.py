@@ -301,10 +301,6 @@ _OPTIONAL_DEPENDENCY_MESSAGES = {
         "Redshift ingestion requires optional dependency 'redshift-connector'. "
         "Install it with: pip install 'semantica[db-redshift]'"
     ),
-    ".powerbi_ingestor": (
-        "Power BI ingestion requires optional dependency 'requests'. "
-        "Install it with: pip install 'semantica[ingest-powerbi]'"
-    ),
 }
 
 
@@ -377,15 +373,6 @@ def __getattr__(name: str) -> Any:
         "RedshiftConnector",
     }:
         if not getattr(module, "REDSHIFT_AVAILABLE", True):
-            message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
-            if message:
-                raise ImportError(message)
-
-    if module_name == ".powerbi_ingestor" and name in {
-        "PowerBIIngestor",
-        "PowerBIConnector",
-    }:
-        if not getattr(module, "REQUESTS_AVAILABLE", True):
             message = _OPTIONAL_DEPENDENCY_MESSAGES.get(module_name)
             if message:
                 raise ImportError(message)
