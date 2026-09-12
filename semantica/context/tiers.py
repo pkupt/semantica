@@ -185,9 +185,7 @@ class TierCalculator:
         self.min_corroboration_for_gold = int(min_corroboration_for_gold)
         self.min_confidence = float(min_confidence)
         self.missing_confidence_degrades = bool(missing_confidence_degrades)
-        self.treat_as_missing = self._normalize_treat_as_missing(
-            treat_as_missing
-        )
+        self.treat_as_missing = self._normalize_treat_as_missing(treat_as_missing)
 
     def calculate(
         self,
@@ -225,8 +223,7 @@ class TierCalculator:
         count = self._normalize_count(corroboration_count)
         confidence_is_missing = self._is_absent_confidence(confidence)
         has_usable_confidence = (
-            self._is_usable_confidence(confidence)
-            and not confidence_is_missing
+            self._is_usable_confidence(confidence) and not confidence_is_missing
         )
 
         if count >= self.min_corroboration_for_gold:
@@ -282,8 +279,7 @@ class TierCalculator:
                 value = float(candidate)
             except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    "treat_as_missing values must be numbers, got "
-                    f"{candidate!r}"
+                    "treat_as_missing values must be numbers, got " f"{candidate!r}"
                 ) from exc
             if not 0.0 <= value <= 1.0:
                 raise ValueError(

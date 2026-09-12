@@ -5,6 +5,7 @@ Covers tier ordering, the corroboration-led thresholds, the degradation rules
 for missing or unusable confidence, the placeholder confidence values that
 count as absent, and the tolerance for messy inputs.
 """
+
 import json
 import unittest
 
@@ -98,9 +99,7 @@ class TestMissingConfidenceDegradation(unittest.TestCase):
 
     def test_missing_confidence_never_yields_gold(self):
         for count in (2, 5, 50):
-            self.assertIsNot(
-                self.calculator.calculate(count, None), TrustTier.GOLD
-            )
+            self.assertIsNot(self.calculator.calculate(count, None), TrustTier.GOLD)
 
     def test_degradation_can_be_disabled(self):
         calculator = TierCalculator(missing_confidence_degrades=False)
@@ -138,20 +137,12 @@ class TestInputHandling(unittest.TestCase):
         self.assertIs(tier, TrustTier.SILVER)
 
     def test_infinite_confidence_downgrades(self):
-        self.assertIs(
-            self.calculator.calculate(2, float("inf")), TrustTier.SILVER
-        )
-        self.assertIs(
-            self.calculator.calculate(2, float("-inf")), TrustTier.SILVER
-        )
+        self.assertIs(self.calculator.calculate(2, float("inf")), TrustTier.SILVER)
+        self.assertIs(self.calculator.calculate(2, float("-inf")), TrustTier.SILVER)
 
     def test_infinite_count_is_treated_as_zero(self):
-        self.assertIs(
-            self.calculator.calculate(float("inf"), 0.9), TrustTier.BRONZE
-        )
-        self.assertIs(
-            self.calculator.calculate(float("-inf"), 0.9), TrustTier.BRONZE
-        )
+        self.assertIs(self.calculator.calculate(float("inf"), 0.9), TrustTier.BRONZE)
+        self.assertIs(self.calculator.calculate(float("-inf"), 0.9), TrustTier.BRONZE)
 
     def test_nan_count_is_treated_as_zero(self):
         self.assertIs(
@@ -202,9 +193,7 @@ class TestTreatAsMissing(unittest.TestCase):
 
     def test_answer_placeholder_cannot_earn_gold(self):
         for count in (2, 5, 50):
-            self.assertIsNot(
-                self.calculator.calculate(count, 1.0), TrustTier.GOLD
-            )
+            self.assertIsNot(self.calculator.calculate(count, 1.0), TrustTier.GOLD)
 
     def test_answer_placeholder_downgrades_gold(self):
         self.assertIs(self.calculator.calculate(2, 1.0), TrustTier.SILVER)
