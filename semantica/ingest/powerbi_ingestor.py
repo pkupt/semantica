@@ -67,7 +67,7 @@ import requests
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
-from .ssrf import request_with_ssrf_guard
+from .ssrf import parse_bool, request_with_ssrf_guard
 
 __all__ = [
     "PowerBIData",
@@ -95,6 +95,19 @@ def _origin(url: str) -> tuple:
     scheme = (parsed.scheme or "").lower()
     default_port = 443 if scheme == "https" else 80
     return scheme, (parsed.hostname or "").lower(), parsed.port or default_port
+
+
+def _decode_json(response: Any) -> Any:
+    """Decode a response body, falling back to raw text when it is not JSON.
+
+    Azure's front door answers 502/503 with an HTML error page. Calling
+    ``response.json()`` before checking the status would raise
+    ``JSONDecodeError`` and hide the status code the caller has to report.
+    """
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +211,10 @@ class PowerBIConnector:
         self.api_base = (api_base or _DEFAULT_API_BASE).rstrip("/")
         self.token_url_template = token_url or _DEFAULT_TOKEN_URL
         self.scope = scope or _DEFAULT_SCOPE
-        self.allow_private_ips = allow_private_ips
+        # Routed through parse_bool(): "false" and "0" arriving as strings
+        # from an env or CLI config are truthy in Python, and a raw
+        # assignment would quietly turn every SSRF check below into a no-op.
+        self.allow_private_ips = parse_bool(allow_private_ips, default=False)
         self.timeout = timeout
         self.config: Dict[str, Any] = config
 
@@ -276,11 +292,15 @@ class PowerBIConnector:
                 data=data,
                 timeout=self.timeout,
             )
-            body = response.json()
+            body = _decode_json(response)
             if response.status_code >= 400:
                 raise ProcessingError(
                     f"Power BI token endpoint returned {response.status_code}: "
                     f"{str(body)[:200]}"
+                )
+            if not isinstance(body, dict):
+                raise ProcessingError(
+                    "Power BI token endpoint returned a non-JSON body."
                 )
             token = body.get("access_token")
             if not token:
@@ -346,13 +366,15 @@ class PowerBIConnector:
         Raises:
             ProcessingError: If the request or JSON decoding fails.
         """
-        headers = self._auth_headers()
         url = self._url(path)
         items: List[Any] = []
         saw_value = False
         hops = 0
 
         while url:
+            # Rebuilt on every hop: a large collection can outlive the token
+            # lifetime, and _ensure_token() refreshes it when that happens.
+            headers = self._auth_headers()
             try:
                 response = request_with_ssrf_guard(
                     "GET",
@@ -363,7 +385,7 @@ class PowerBIConnector:
                     params=params if hops == 0 else None,
                     timeout=self.timeout,
                 )
-                body = response.json()
+                body = _decode_json(response)
                 if response.status_code >= 400:
                     raise ProcessingError(
                         f"Power BI API returned {response.status_code} for "
@@ -376,6 +398,13 @@ class PowerBIConnector:
                     f"Failed to call Power BI API '{path}': {type(exc).__name__}"
                 ) from exc
 
+            if not isinstance(body, (dict, list)):
+                # 2xx carrying an HTML body — an SSO redirect or a captive
+                # portal — would otherwise be unpacked character by character
+                # by list() in the collection helpers instead of failing.
+                raise ProcessingError(
+                    f"Power BI API returned a non-JSON body for '{path}'."
+                )
             if isinstance(body, dict):
                 if "value" in body:
                     saw_value = True
@@ -438,14 +467,22 @@ class PowerBIConnector:
     # ------------------------------------------------------------------
 
     def test_connection(self) -> bool:
-        """Verify credentials by acquiring a token and listing workspaces.
+        """Verify credentials by acquiring a token and reading one endpoint.
+
+        When a default workspace is configured the probe targets that
+        workspace, because a principal granted access to a single workspace
+        cannot list groups and would otherwise fail a check its credentials
+        actually pass.
 
         Returns:
             ``True`` when both steps succeed, ``False`` otherwise.
         """
         try:
             self._ensure_token()
-            self.get_workspaces()
+            if self.workspace_id:
+                self.get(f"groups/{self.workspace_id}")
+            else:
+                self.get_workspaces()
             return True
         except Exception as exc:
             self.logger.debug("Power BI connection test failed: %s", type(exc).__name__)
@@ -512,6 +549,12 @@ class PowerBIIngestor:
 
         self.config: Dict[str, Any] = config or {}
         self.config.update(kwargs)
+        # Taken out here so it reaches the connector once, through the
+        # connector's own parse_bool() path, rather than being passed both
+        # explicitly and again inside **self.config.
+        allow_private_ips = parse_bool(
+            self.config.pop("allow_private_ips", allow_private_ips), default=False
+        )
 
         self.connector: PowerBIConnector = connector or PowerBIConnector(
             tenant_id=tenant_id,
@@ -613,8 +656,14 @@ class PowerBIIngestor:
             children = [k for k in ("datasets", "reports", "dataflows") if k in wanted]
             if children:
                 if scope:
+                    # Tag the same way the multi-workspace walk below does:
+                    # Power BI does not consistently echo workspaceId on the
+                    # child endpoints, and GraphBuilder needs the link.
                     for key in children:
-                        collected[key] = self._fetch_child(key, scope)
+                        for item in self._fetch_child(key, scope):
+                            if isinstance(item, dict):
+                                item.setdefault("workspace_id", scope)
+                            collected[key].append(item)
                 else:
                     # With no workspace configured the unscoped endpoints only
                     # cover "My workspace", and dataflows have no unscoped
@@ -728,11 +777,12 @@ class PowerBIIngestor:
                 if not isinstance(item, dict):
                     continue
                 text = self._describe(item, singular)
-                metadata: Dict[str, Any] = {
-                    "source": "powerbi",
-                    "resource_type": singular,
-                }
-                metadata.update(item)
+                # Copy the item first and set the connector-owned keys after,
+                # so a "source" or "resource_type" coming from Power BI
+                # cannot clobber them.
+                metadata: Dict[str, Any] = dict(item)
+                metadata["source"] = "powerbi"
+                metadata["resource_type"] = singular
                 documents.append(
                     {
                         "id": str(item.get("id") or f"{singular}-{index}"),

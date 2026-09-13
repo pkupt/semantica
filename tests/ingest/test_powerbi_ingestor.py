@@ -14,6 +14,7 @@ from semantica.ingest.powerbi_ingestor import (
     PowerBIData,
     PowerBIIngestor,
 )
+from semantica.utils.exceptions import ProcessingError, ValidationError
 
 GUARD = "semantica.ingest.powerbi_ingestor.request_with_ssrf_guard"
 
@@ -25,13 +26,21 @@ CREDS = {
 
 
 class FakeResponse:
-    """Minimal stand-in for ``requests.Response``."""
+    """Minimal stand-in for ``requests.Response``.
 
-    def __init__(self, payload, status_code=200):
+    ``json_error`` makes :meth:`json` raise, which is how a real response
+    behaves when the body is an HTML error page rather than JSON.
+    """
+
+    def __init__(self, payload, status_code=200, text=None, json_error=None):
         self._payload = payload
         self.status_code = status_code
+        self.text = text if text is not None else str(payload)
+        self._json_error = json_error
 
     def json(self):
+        if self._json_error is not None:
+            raise self._json_error
         return self._payload
 
 
@@ -60,16 +69,31 @@ class TestLazyExports(unittest.TestCase):
 
 class TestCredentialValidation(unittest.TestCase):
     def test_missing_tenant_raises(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             PowerBIConnector(client_id="c", client_secret="s")
 
     def test_missing_client_id_raises(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             PowerBIConnector(tenant_id="t", client_secret="s")
 
     def test_missing_client_secret_raises(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             PowerBIConnector(tenant_id="t", client_id="c")
+
+    def test_allow_private_ips_string_false_is_not_truthy(self):
+        connector = PowerBIConnector(**CREDS, allow_private_ips="false")
+        self.assertFalse(connector.allow_private_ips)
+        connector.close()
+
+    def test_allow_private_ips_string_true_opt_in(self):
+        connector = PowerBIConnector(**CREDS, allow_private_ips="true")
+        self.assertTrue(connector.allow_private_ips)
+        connector.close()
+
+    def test_allow_private_ips_defaults_to_false(self):
+        connector = PowerBIConnector(**CREDS)
+        self.assertFalse(connector.allow_private_ips)
+        connector.close()
 
     def test_full_credentials_construct(self):
         connector = PowerBIConnector(**CREDS)
@@ -108,14 +132,14 @@ class TestTokenAcquisition(unittest.TestCase):
     def test_token_endpoint_error_raises(self):
         connector = PowerBIConnector(**CREDS)
         with patch(GUARD, return_value=FakeResponse({"error": "nope"}, 401)):
-            with self.assertRaises(Exception):
+            with self.assertRaises(ProcessingError):
                 connector._request_token()
         connector.close()
 
     def test_token_missing_field_raises(self):
         connector = PowerBIConnector(**CREDS)
         with patch(GUARD, return_value=FakeResponse({"expires_in": 3600})):
-            with self.assertRaises(Exception):
+            with self.assertRaises(ProcessingError):
                 connector._request_token()
         connector.close()
 
@@ -176,7 +200,7 @@ class TestApiCalls(unittest.TestCase):
         }
         with patch(GUARD) as guard:
             guard.side_effect = [token_response(), FakeResponse(first)]
-            with self.assertRaises(Exception):
+            with self.assertRaises(ProcessingError):
                 self.connector.get("datasets")
         self.assertEqual(guard.call_count, 2)  # token + first page only
 
@@ -205,7 +229,7 @@ class TestApiCalls(unittest.TestCase):
                 token_response(),
                 FakeResponse({"error": "boom"}, 403),
             ]
-            with self.assertRaises(Exception):
+            with self.assertRaises(ProcessingError):
                 self.connector.get_workspaces()
 
     def test_test_connection_true(self):
@@ -217,6 +241,69 @@ class TestApiCalls(unittest.TestCase):
         with patch(GUARD) as guard:
             guard.side_effect = [token_response(), FakeResponse({}, 500)]
             self.assertFalse(self.connector.test_connection())
+
+    def test_test_connection_probes_configured_workspace(self):
+        connector = PowerBIConnector(**CREDS, workspace_id="ws-7")
+        with patch(GUARD) as guard:
+            guard.side_effect = [
+                token_response(),
+                FakeResponse({"id": "ws-7", "name": "Only"}),
+            ]
+            self.assertTrue(connector.test_connection())
+        args, _ = guard.call_args
+        self.assertEqual(args[1], "https://api.powerbi.com/v1.0/myorg/groups/ws-7")
+        connector.close()
+
+    def test_non_json_gateway_error_keeps_status_code(self):
+        with patch(GUARD) as guard:
+            guard.side_effect = [
+                token_response(),
+                FakeResponse(
+                    None,
+                    status_code=502,
+                    text="<html>bad gateway</html>",
+                    json_error=ValueError("Expecting value"),
+                ),
+            ]
+            with self.assertRaises(ProcessingError) as ctx:
+                self.connector.get_workspaces()
+        self.assertIn("502", str(ctx.exception))
+
+    def test_non_json_success_body_is_rejected(self):
+        # A 200 carrying an SSO redirect page must not be unpacked as a
+        # sequence of characters and read back as an empty workspace list.
+        with patch(GUARD) as guard:
+            guard.side_effect = [
+                token_response(),
+                FakeResponse(
+                    None,
+                    status_code=200,
+                    text="<html>sign in</html>",
+                    json_error=ValueError("Expecting value"),
+                ),
+            ]
+            with self.assertRaises(ProcessingError) as ctx:
+                self.connector.get_workspaces()
+        self.assertIn("non-JSON", str(ctx.exception))
+
+    def test_pagination_rebuilds_headers_each_hop(self):
+        first = {
+            "value": [{"id": "a"}],
+            "@odata.nextLink": "https://api.powerbi.com/v1.0/myorg/datasets?skip=1",
+        }
+        with patch(GUARD) as guard:
+            guard.side_effect = [
+                token_response(),
+                FakeResponse(first),
+                FakeResponse({"value": [{"id": "b"}]}),
+            ]
+            with patch.object(
+                self.connector, "_auth_headers", wraps=self.connector._auth_headers
+            ) as headers_spy:
+                self.connector.get("datasets")
+        # One build per hop, so a token that expires mid-pagination is
+        # refreshed rather than replayed on the next request.
+        self.assertEqual(headers_spy.call_count, 2)
 
 
 class TestIngestor(unittest.TestCase):
@@ -305,8 +392,19 @@ class TestIngestor(unittest.TestCase):
         self.assertIn("https://api.powerbi.com/v1.0/myorg/groups/ws-9/datasets", urls)
         self.assertIn("https://api.powerbi.com/v1.0/myorg/groups/ws-9/dataflows", urls)
 
+    def test_scoped_ingest_tags_workspace_id(self):
+        self.guard.side_effect = [
+            token_response(),
+            FakeResponse({"id": "ws-9", "name": "Only"}),
+            FakeResponse({"value": [{"id": "ds-9"}]}),
+            FakeResponse({"value": []}),
+            FakeResponse({"value": []}),
+        ]
+        data = self.ingestor.ingest_workspace_metadata(workspace_id="ws-9")
+        self.assertEqual(data.datasets[0]["workspace_id"], "ws-9")
+
     def test_unknown_include_raises(self):
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError):
             self.ingestor.ingest_workspace_metadata(include=["nope"])
 
     def test_export_documents_shape(self):
@@ -318,6 +416,21 @@ class TestIngestor(unittest.TestCase):
             self.assertIn("text", doc)
             self.assertIn("metadata", doc)
             self.assertEqual(doc["metadata"]["source"], "powerbi")
+
+    def test_export_documents_keeps_source_over_upstream_key(self):
+        data = PowerBIData(
+            workspaces=[],
+            datasets=[{"id": "ds-1", "source": "upstream"}],
+            reports=[],
+            dataflows=[],
+        )
+        documents = self.ingestor.export_as_documents(data)
+        self.assertEqual(documents[0]["metadata"]["source"], "powerbi")
+
+    def test_config_string_allow_private_ips_is_parsed(self):
+        ingestor = PowerBIIngestor(**CREDS, config={"allow_private_ips": "false"})
+        self.assertFalse(ingestor.connector.allow_private_ips)
+        ingestor.close()
 
     def test_export_documents_resource_types(self):
         data = self.ingestor.ingest_workspace_metadata()

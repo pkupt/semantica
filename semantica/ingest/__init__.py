@@ -133,6 +133,11 @@ import importlib
 from typing import TYPE_CHECKING, Any, Dict, Tuple
 
 if TYPE_CHECKING:
+    from .powerbi_ingestor import (
+        PowerBIConnector,
+        PowerBIData,
+        PowerBIIngestor,
+    )
     from .salesforce_ingestor import (
         SalesforceConnector,
         SalesforceData,
