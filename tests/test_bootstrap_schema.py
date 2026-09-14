@@ -205,3 +205,61 @@ def test_per_call_min_occurrences_gates_classes_too():
     )
     class_names = {c.get("name") for c in ontology.get("classes", [])}
     assert "Product" not in class_names, "per-call gate must drop sparse class"
+
+
+def test_draft_ttl_round_trips_through_from_owl():
+    # The emitted TTL is not only a human-readable artifact: it is an input to
+    # ExtractionSchema.from_owl. Parsing it back must reproduce the induced
+    # vocabulary, so the two documented entry points -- from_ontology on the
+    # returned dict, from_owl on the returned TTL -- agree on a sample whose
+    # entity types are already spelled the way the generator normalizes them.
+    from semantica.semantic_extract.schema import ExtractionSchema
+
+    entities, rels = _sample()
+    result = bootstrap_schema(entities, rels)
+    from_ttl = ExtractionSchema.from_owl(result["ttl"])
+    from_dict = ExtractionSchema.from_ontology(result["ontology"])
+
+    assert "Person" in from_ttl.concepts
+    assert "Org" in from_ttl.concepts
+    assert from_ttl.concepts == from_dict.concepts
+    assert set(from_ttl.predicates) == set(from_dict.predicates)
+    assert from_ttl.predicates["worksFor"].domain == frozenset({"Person"})
+    assert from_ttl.predicates["worksFor"].range == frozenset({"Org"})
+
+
+def test_unresolved_endpoint_not_resurrected_by_parsing_the_ttl():
+    # An endpoint that never cleared the frequency gate is serialized as
+    # owl:Thing. Reading the draft back must not turn that into a concept --
+    # neither as the filtered raw type nor as a literal "Thing" -- or the gate
+    # would be undone by the very artifact handed to a reviewer.
+    from semantica.semantic_extract.schema import ExtractionSchema
+
+    entities, rels = _sample()
+    # 'Product' appears once (fails the class gate) yet is a worksFor target.
+    rels = [
+        {"type": "worksFor", "source": "John", "target": "Widget"},
+        {"type": "worksFor", "source": "Jane", "target": "Widget"},
+    ]
+    result = bootstrap_schema(entities, rels, min_occurrences=2)
+    assert "owl:Thing" in result["ttl"]
+
+    schema = ExtractionSchema.from_owl(result["ttl"])
+    assert "Product" not in schema.concepts
+    assert "Thing" not in schema.concepts
+    assert "owl:Thing" not in schema.concepts
+    works_for = schema.predicates["worksFor"]
+    assert works_for.domain == frozenset({"Person"})
+    # Unconstrained, expressed as the empty set -- not the raw endpoint name.
+    assert works_for.range == frozenset()
+
+
+def test_empty_draft_ttl_parses_to_an_empty_schema():
+    # A draft induced before any extraction has run is still a legal artifact:
+    # from_owl must accept it and yield an empty vocabulary rather than raise.
+    from semantica.semantic_extract.schema import ExtractionSchema
+
+    result = bootstrap_schema([], [])
+    schema = ExtractionSchema.from_owl(result["ttl"])
+    assert schema.concepts == frozenset()
+    assert schema.predicates == {}
