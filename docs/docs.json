@@ -107,6 +107,7 @@
               "integrations/docling",
               "integrations/snowflake",
               "integrations/databricks",
+              "integrations/bigquery",
               "integrations/salesforce",
               "integrations/redshift",
               "integrations/powerbi"
@@ -203,6 +204,7 @@
               "reference/distance",
               "reference/semantic_extract",
               "reference/reasoning",
+              "reference/truth_maintenance",
               "reference/ontology"
             ]
           },
