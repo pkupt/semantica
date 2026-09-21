@@ -98,6 +98,38 @@ def test_attach_idempotent():
     assert ctx.metadata["trust_tier"] == first
 
 
+def test_attach_grades_graph_fact_without_signals_as_quarantine():
+    # A graph fact must always carry a tier: no readable signals degrade to
+    # quarantine instead of staying unscored (issue #1557: missing evidence
+    # is never trusted as high confidence).
+    retriever = ContextRetriever()
+    ctx = _ctx("f", node_id="ent_1")
+    retriever._attach_trust_tiers([ctx])
+    assert ctx.metadata["trust_tier"] == TrustTier.QUARANTINE.value
+
+
+def test_attach_does_not_mutate_shared_metadata():
+    # Retrieved metadata dicts can be shared with the vector store / memory;
+    # writing the tier in place would persist a query-time grade into stored
+    # state, where it goes stale as sources change.
+    retriever = ContextRetriever()
+    store_metadata = {"confidence": 0.9}
+    ctx = RetrievedContext(content="f", score=1.0, metadata=store_metadata)
+    retriever._attach_trust_tiers([ctx])
+    assert ctx.metadata["trust_tier"] == TrustTier.BRONZE.value
+    assert ctx.metadata is not store_metadata
+    assert store_metadata == {"confidence": 0.9}
+
+
+def test_attach_recomputes_stale_tier():
+    # A pre-existing grade is never trusted: it is recomputed from current
+    # signals, so a tier cannot outlive the evidence it was derived from.
+    retriever = ContextRetriever()
+    ctx = _ctx("f", trust_tier="gold", confidence=0.9)  # no corroboration
+    retriever._attach_trust_tiers([ctx])
+    assert ctx.metadata["trust_tier"] == TrustTier.BRONZE.value
+
+
 # ----------------------------------------------------------------------
 # Filtering
 # ----------------------------------------------------------------------
@@ -242,3 +274,30 @@ def test_retrieve_drift_keeps_unscored_summaries_with_min_trust_tier():
         "drift summary a",
         "drift summary b",
     ]
+
+
+def test_retrieve_hybrid_keeps_global_summaries_with_min_trust_tier():
+    # Hybrid merges local facts with structurally unscored global summaries;
+    # the threshold must filter each leg with its own semantics, so the
+    # summaries survive instead of being stripped from every hybrid response.
+    retriever = ContextRetriever()
+    local_fake = [_ctx("local gold", confidence=0.9, corroboration_count=3)]
+    global_fake = [_ctx("global summary")]
+    with patch.object(
+        retriever, "_retrieve_from_vector", return_value=local_fake
+    ), patch(
+        "semantica.context.global_retriever.GlobalGraphRetriever"
+    ) as GGR:
+        instance = GGR.return_value
+        res = MagicMock()
+        res.to_retrieved_contexts.return_value = global_fake
+        instance.search.return_value = res
+        results = retriever.retrieve(
+            "q",
+            mode="hybrid",
+            max_results=10,
+            min_trust_tier=TrustTier.SILVER,
+        )
+    contents = {c.content for c in results}
+    assert "local gold" in contents
+    assert "global summary" in contents
