@@ -955,25 +955,17 @@ def export_knowledge_graph(
 
     # Route to appropriate exporter
     if format in ["json", "json-ld"]:
-        export_json(
-            knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs
-        )
+        export_json(knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs)
     elif format == "csv":
         export_csv(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     elif format in ["turtle", "rdfxml", "jsonld", "ntriples", "n3"]:
-        export_rdf(
-            knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs
-        )
+        export_rdf(knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs)
     elif format in ["graphml", "gexf", "dot"]:
-        export_graph(
-            knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs
-        )
+        export_graph(knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs)
     elif format in ["yaml", "yml"]:
         export_yaml(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     elif format in ["owl-xml", "owl"]:
-        export_owl(
-            knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs
-        )
+        export_owl(knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs)
     elif format == "cypher":
         export_lpg(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     elif format in ["neo4j_csv", "neo4j-csv"]:
