@@ -246,9 +246,12 @@ class ContextRetriever:
             min_trust_tier: Optional minimum TrustTier. When set, each result
                 is graded on evidence quality (see the "trust_tier" key in
                 RetrievedContext.metadata) and only results meeting the
-                minimum are returned. Results that carry no tier signal are
-                excluded as well; to keep them, omit min_trust_tier and apply
-                filter_by_tier(..., include_unscored=True) to the results.
+                minimum are returned. Graph facts without readable signals
+                grade to quarantine. In local mode, results that carry no
+                tier signal (vector chunks with neither a graph node id nor a
+                confidence reading) are excluded too; global, drift and
+                hybrid keep such unscored summaries so a threshold cannot
+                empty the response.
             **options: Additional options:
                 - entity_ids: Filter by entity IDs
                 - node_types: Filter by node types
@@ -292,6 +295,7 @@ class ContextRetriever:
                 use_graph_expansion=use_graph_expansion,
                 min_relevance_score=min_relevance_score,
                 mode="local",
+                min_trust_tier=min_trust_tier,
                 **options,
             )
             global_res = self.retrieve_global(
@@ -299,6 +303,7 @@ class ContextRetriever:
                 max_results=max_results * 2,
                 min_relevance_score=min_relevance_score,
                 as_contexts=True,
+                min_trust_tier=min_trust_tier,
                 **options,
             )
             merged = self._rank_and_merge(local_res + global_res, query)
@@ -308,9 +313,11 @@ class ContextRetriever:
                 else max(0.0, min(1.0, min_relevance_score))
             )
             filtered = [r for r in merged if r.score >= eff_min_score]
+            # Tiers were attached and the threshold applied inside each
+            # sub-retrieval: the local leg drops unscored items, while the
+            # global leg keeps structurally unscored summaries. Filtering the
+            # merged list again would strip those summaries out.
             self._attach_trust_tiers(filtered)
-            if min_trust_tier is not None:
-                filtered = self.filter_by_tier(filtered, min_trust_tier)
             return filtered[:max_results]
         elif norm_mode != "local":
             raise ValueError(
@@ -462,32 +469,37 @@ class ContextRetriever:
 
         return corroboration, confidence
 
-    def _attach_trust_tiers(
-        self, results: List["RetrievedContext"]
-    ) -> None:
+    def _attach_trust_tiers(self, results: List["RetrievedContext"]) -> None:
         """
         Grade each result on evidence quality and record it in metadata.
 
-        Each result with at least one usable signal gets
-        ``metadata["trust_tier"]`` set to the tier's stable string value.
-        Results that expose no signal at all (for example vector chunks with
-        neither a graph node id nor a confidence reading) are left unscored so
-        that a missing signal is never silently treated as quarantine.
+        Graph facts (results carrying a ``node_id``) always receive a tier:
+        when neither corroboration nor confidence is readable, the calculator
+        degrades them to quarantine instead of leaving the grade blank, so a
+        missing signal is never treated as if it had been measured. Other
+        results (for example vector chunks with neither a graph node id nor a
+        confidence reading) are left unscored. An existing ``trust_tier`` is
+        recomputed from current signals on every pass, so a grade cannot
+        outlive the evidence it was derived from.
+
+        The tier is recorded on a copy of the result's metadata. Metadata
+        dicts on retrieved contexts can be shared with the underlying vector
+        store or memory, and writing in place would persist a query-time
+        grade into stored state, where it would go stale as sources change.
 
         Args:
             results: Retrieved contexts to grade in place.
         """
         for context in results:
-            if "trust_tier" in context.metadata:
-                continue
             corroboration, confidence = self._tier_signals_for(context)
-            if corroboration is None and confidence is None:
+            is_graph_fact = bool(context.metadata.get("node_id"))
+            if not is_graph_fact and corroboration is None and confidence is None:
                 continue
             try:
                 tier = self.tier_calculator.calculate(corroboration, confidence)
             except Exception:
                 continue
-            context.metadata["trust_tier"] = tier.value
+            context.metadata = {**context.metadata, "trust_tier": tier.value}
 
     def filter_by_tier(
         self,
