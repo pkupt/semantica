@@ -933,6 +933,7 @@ def export_knowledge_graph(
             ".jsonld": "json-ld",
             ".csv": "csv",
             ".ttl": "turtle",
+            ".nt": "ntriples",
             ".rdf": "rdfxml",
             ".graphml": "graphml",
             ".gexf": "gexf",

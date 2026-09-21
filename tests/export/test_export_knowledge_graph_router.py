@@ -102,6 +102,26 @@ class TestExtensionDetection:
         assert isinstance(parsed, dict)
         assert parsed["entities"][0]["id"] == "e1"
 
+    def test_nt_extension_produces_ntriples(self, tmp_path):
+        """`.nt` routes to N-Triples, which docs/reference/export.md documents
+        as its extension and RDFExporter already implements.
+
+        The extension map had no `.nt` entry, so once detection ran at all this
+        suffix fell through to the JSON default. N-Triples is told apart from
+        Turtle by the absence of prefix declarations: every triple carries an
+        absolute IRI.
+        """
+        export_knowledge_graph(TWO_NODE_KG, str(tmp_path / "router.nt"))
+
+        body = _written(tmp_path, "router").read_text(encoding="utf-8")
+        assert not body.lstrip().startswith("{"), "wrote JSON for a .nt path"
+        assert "@prefix" not in body, "prefix declarations mean Turtle, not N-Triples"
+        lines = [ln for ln in body.splitlines() if ln.strip()]
+        assert lines, "N-Triples output was empty"
+        for line in lines:
+            assert line.startswith("<"), f"not a triple statement: {line[:60]}"
+            assert line.rstrip().endswith("."), f"triple not terminated: {line[:60]}"
+
     def test_explicit_format_still_wins_over_the_extension(self, tmp_path):
         """Passing ``format`` explicitly keeps overriding the extension."""
         export_knowledge_graph(
