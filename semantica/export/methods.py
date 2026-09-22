@@ -169,6 +169,7 @@ from .arango_aql_exporter import ArangoAQLExporter
 from .arrow_exporter import ArrowExporter
 from .config import export_config
 from .csv_exporter import CSVExporter
+from .endpoint_names import RELATIONSHIP_COLLECTIONS, canonical_endpoints
 from .graph_exporter import GraphExporter
 from .json_exporter import JSONExporter
 from .lpg_exporter import LPGExporter
@@ -881,6 +882,11 @@ def generate_report(
         raise
 
 
+# Collections whose records carry relationship endpoints, and the endpoint
+# names themselves, live in endpoint_names so the exporters that classify or
+# rewrite records share one table instead of keeping their own copy.
+
+
 def export_knowledge_graph(
     knowledge_graph: Dict[str, Any],
     file_path: Union[str, Path],
@@ -896,22 +902,30 @@ def export_knowledge_graph(
 
     Args:
         knowledge_graph: Knowledge graph dictionary with entities and
-            relationships
+            relationships. Relationships may name their endpoints with any of
+            the spellings the graph stores use (``source_id``, ``source``,
+            ``start_node_id``, ``start_id``, ``from``, and the target-side
+            equivalents); they are normalized to ``source_id``/``target_id``
+            before routing, since that is all the serializers understand.
         file_path: Output file path (format auto-detected from extension
             if format not specified)
         format: Export format (auto-detected from file extension if not
             specified)
             - "json", "json-ld": JSONExporter
             - "csv": CSVExporter
+            - "parquet": ParquetExporter
+            - "arrow": ArrowExporter
             - "ttl", "turtle": RDFExporter (turtle)
             - "rdf", "rdfxml": RDFExporter (rdfxml)
             - "graphml": GraphExporter (graphml)
             - "gexf": GraphExporter (gexf)
             - "dot": GraphExporter (dot)
             - "yaml", "yml": YAML exporters
-            - "owl": OWLExporter
+            - "owl", "owl-xml": OWLExporter, which takes an ontology dictionary
+              rather than a knowledge graph; a graph with no classes exports no
+              classes
             - "cypher": LPGExporter
-            - "aql": ArangoAQLExporter
+            - "aql", "arangodb": ArangoAQLExporter
         method: Optional specific export method. Left as ``None``, each
             exporter keeps its own default rather than being handed a value
             the caller never chose.
@@ -924,6 +938,18 @@ def export_knowledge_graph(
         >>> export_knowledge_graph(kg, "output.ttl")   # extension decides
         >>> export_knowledge_graph(kg, "output.cypher", format="cypher")
     """
+    # Store-shaped relationship records carry their endpoints under names the
+    # serializers do not know. Normalize once here rather than in each exporter:
+    # this function is the single entry point every caller goes through, and the
+    # RDF serializers, the tabular exporters and the pass-through exporters
+    # (JSON, CSV, YAML) each read the records differently.
+    if isinstance(knowledge_graph, dict):
+        for key in RELATIONSHIP_COLLECTIONS:
+            collection = knowledge_graph.get(key)
+            canonical = canonical_endpoints(collection)
+            if canonical is not collection:
+                knowledge_graph = {**knowledge_graph, key: canonical}
+
     # Auto-detect format from file extension if not specified
     if not format:
         file_path_obj = Path(file_path)
@@ -944,6 +970,7 @@ def export_knowledge_graph(
             ".cypher": "cypher",
             ".aql": "aql",
             ".parquet": "parquet",
+            ".arrow": "arrow",
         }
         format = format_map.get(ext, "json")
 
@@ -965,15 +992,26 @@ def export_knowledge_graph(
     elif format in ["yaml", "yml"]:
         export_yaml(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     elif format in ["owl-xml", "owl"]:
-        export_owl(knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs)
+        # OWLExporter accepts "owl-xml" or "turtle". The extension map and the
+        # docs already call the default "owl-xml", so the short name is
+        # normalized the same way instead of being forwarded and rejected.
+        export_owl(
+            knowledge_graph,
+            file_path,
+            format="owl-xml" if format == "owl" else format,
+            **_method_kwargs(),
+            **kwargs,
+        )
     elif format == "cypher":
         export_lpg(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     elif format in ["neo4j_csv", "neo4j-csv"]:
         # file_path is treated as the output directory; nodes.csv and
         # relationships.csv are written inside it.
         export_neo4j_csv(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
-    elif format == "aql":
+    elif format in ["aql", "arangodb"]:
         export_arango(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
+    elif format == "arrow":
+        export_arrow(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     elif format == "parquet":
         export_parquet(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     else:

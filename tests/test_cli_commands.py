@@ -1882,11 +1882,15 @@ class TestOntology:
 
 
 class TestExport:
-    def test_help_shows_14_formats(self, runner):
+    def test_help_shows_the_offered_formats(self, runner):
         result = runner.invoke(cli_module.main, ["export", "--help"])
         _ok(result)
-        for fmt in ["turtle", "parquet", "csv", "graphml", "owl", "arangodb"]:
+        for fmt in cli_module._EXPORT_FORMATS:
             assert fmt in result.output
+        # These three need an ontology or an Explorer session, not a graph
+        # dump, so they are no longer offered (#1712).
+        for fmt in ["owl", "shacl", "distance-enriched"]:
+            assert fmt not in result.output
         for flag in ["--with-provenance", "--filter", "--compress", "--dry-run"]:
             assert flag in result.output
 
@@ -1908,6 +1912,12 @@ class TestExport:
         assert data["dry_run"] is True
 
     def test_real_export_runtime_path(self, runner, tmp_path, monkeypatch):
+        # Record shape copied from the Neo4j and FalkorDB backends: their
+        # get_relationships() names the endpoints start_node_id/end_node_id,
+        # and get_nodes() nests its fields under "properties". The local store
+        # uses source_id/target_id, so a fixture written against it hid the
+        # fact that the command fed the exporters a shape they could not read
+        # (#1712).
         class FakeGraphStore:
             def get_nodes(self, labels=None, properties=None, limit=100, **options):
                 return [
@@ -1923,8 +1933,8 @@ class TestExport:
                 return [
                     {
                         "id": "r1",
-                        "source": "n1",
-                        "target": "n1",
+                        "start_node_id": "n1",
+                        "end_node_id": "n1",
                         "type": "KNOWS",
                         "properties": {},
                     }
@@ -1961,8 +1971,8 @@ class TestExport:
             lambda **kwargs: [
                 {
                     "id": "r1",
-                    "source": "n1",
-                    "target": "n1",
+                    "start_node_id": "n1",
+                    "end_node_id": "n1",
                     "type": "KNOWS",
                     "properties": {},
                 }
@@ -1973,8 +1983,8 @@ class TestExport:
             lambda **kwargs: [
                 {
                     "id": "r1",
-                    "source": "n1",
-                    "target": "n1",
+                    "start_node_id": "n1",
+                    "end_node_id": "n1",
                     "type": "KNOWS",
                     "properties": {},
                 }

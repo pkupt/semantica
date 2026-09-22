@@ -88,6 +88,7 @@ from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.helpers import ensure_directory
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
+from .endpoint_names import canonical_endpoints, has_endpoints
 
 
 class ParquetExporter:
@@ -160,6 +161,18 @@ class ParquetExporter:
 
         self.logger.debug(f"Parquet exporter initialized: compression={compression}")
 
+    @staticmethod
+    def _records_look_like_relationships(sample: Dict[str, Any]) -> bool:
+        """Whether a record carries both endpoints of a relationship.
+
+        Used to pick a writer for records handed over without a key that names
+        them (a bare list, or a knowledge-graph key other than "entities" and
+        "relationships"). The endpoint names come from endpoint_names, so a
+        record from a server backend, which spells them ``start_node_id`` and
+        ``end_node_id``, is recognised the same as a local one.
+        """
+        return has_endpoints(sample)
+
     def export(
         self,
         data: Union[List[Dict[str, Any]], Dict[str, Any]],
@@ -231,17 +244,40 @@ class ParquetExporter:
                             file_path.parent / f"{file_path.stem}_{key}.parquet"
                         )
 
+                        # A collection from a server backend names a
+                        # relationship's ends start_node_id/end_node_id.
+                        # Normalize before routing, so a store-shaped
+                        # collection is both recognised and written under the
+                        # canonical names. A caller who passed an explicit
+                        # schema picked the columns already, so this cannot
+                        # change what they asked for.
+                        value = canonical_endpoints(value)
+
                         # Use dedicated export methods for entities and relationships
                         # to ensure proper normalization
-                        if key == "entities" and schema is None:
-                            self.export_entities(value, output_path, **options)
-                        elif key == "relationships" and schema is None:
-                            self.export_relationships(value, output_path, **options)
-                        else:
-                            # For other keys, write directly with provided schema
+                        if schema is not None:
+                            # An explicit schema is the caller saying what the
+                            # records are, so it wins over the key name.
                             self._write_parquet(
                                 value, output_path, schema=schema, **options
                             )
+                        elif key == "entities":
+                            self.export_entities(value, output_path, **options)
+                        elif key == "relationships":
+                            self.export_relationships(value, output_path, **options)
+                        elif self._records_look_like_relationships(value[0]):
+                            # A key that is neither. export_knowledge_graph
+                            # hands the whole graph over in one dict
+                            # (entities, relationships, nodes, edges), so those
+                            # duplicate keys land here. Route them by record
+                            # shape, the same way the list branch below has
+                            # always done, rather than falling through to
+                            # _write_parquet with schema=None, which raises
+                            # "Schema is required" no matter what the records
+                            # hold.
+                            self.export_relationships(value, output_path, **options)
+                        else:
+                            self.export_entities(value, output_path, **options)
 
                         exported_files.append(output_path)
                     else:
@@ -265,6 +301,11 @@ class ParquetExporter:
                     tracking_id, message=f"Exporting {len(data)} records..."
                 )
 
+                # Same normalization as the dictionary branch: a bare list from
+                # a server backend has to be recognised and written under the
+                # canonical endpoint names.
+                data = canonical_endpoints(data)
+
                 # If no schema provided, try to auto-detect from data structure
                 if schema is None:
                     if not data:
@@ -274,14 +315,8 @@ class ParquetExporter:
                             "export_entities/export_relationships."
                         )
                     sample = data[0]
-                    has_source = any(
-                        k in sample for k in ["source_id", "source", "from_id", "from"]
-                    )
-                    has_target = any(
-                        k in sample for k in ["target_id", "target", "to_id", "to"]
-                    )
 
-                    if has_source and has_target:
+                    if self._records_look_like_relationships(sample):
                         # Use dedicated method for relationship normalization
                         self.export_relationships(data, file_path, **options)
                     else:

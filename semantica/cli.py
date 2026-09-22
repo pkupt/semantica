@@ -4071,10 +4071,16 @@ def ontology_version(cli_ctx: CLIContext, local_json: bool) -> None:
 # ─── Data Out ─────────────────────────────────────────────────────────────────
 
 
+# Formats this command can build out of a graph-store dump. Three are left out
+# because a dump of entities and relationships cannot feed them: OWL and SHACL
+# are serialized from an ontology (`semantica ontology shacl` generates the
+# shapes), and the distance matrix is computed from an Explorer session graph
+# (POST /api/export/distance-enriched). Offering them advertised a failure, and
+# offering OWL would advertise a document with no classes in it.
 _EXPORT_FORMATS = [
     "turtle", "jsonld", "ntriples", "rdfxml",
     "parquet", "arrow", "csv", "json", "yaml",
-    "graphml", "owl", "shacl", "arangodb", "distance-enriched",
+    "graphml", "arangodb",
 ]
 
 
@@ -4094,7 +4100,7 @@ def export(
     cli_ctx: CLIContext, fmt: str, output: Optional[str], with_provenance: bool,
     filter_str: Optional[str], compress: bool, local_dry: bool, local_json: bool,
 ) -> None:
-    """Export the graph in 14 supported formats.
+    """Export the graph in 11 supported formats.
 
     \b
     Examples:
