@@ -33,7 +33,7 @@ icon: "rocket"
     ```bash From source
     git clone https://github.com/semantica-agi/semantica.git
     cd semantica
-    pip install -e ".[dev]"
+    pip install -e . --group dev   # needs pip 25.1+ (or: uv sync)
     ```
 
     </CodeGroup>

@@ -13,7 +13,7 @@ icon: "circle-question"
 | Question | Answer |
 | :-------- | :------ |
 | License? | MIT: free forever, no paywalled features |
-| Python version? | 3.8+ (3.11+ recommended) |
+| Python version? | 3.10+ (3.11+ recommended) |
 | API key required? | Optional: pattern extraction works with no keys |
 | Works with LangChain / LlamaIndex? | Yes: Semantica is a layer on top, not a replacement |
 | Production-ready? | Yes: 1,000+ tests, security fixes shipped in every release (see [CHANGELOG](https://github.com/semantica-agi/semantica/blob/main/CHANGELOG.md)) |
@@ -99,7 +99,7 @@ See [Installation](/installation) for virtual environment setup, optional extras
 
 <Accordion title="What Python version do I need?" icon="python">
 
-Python **3.8 or higher**. Python 3.11+ is recommended for best performance and compatibility.
+Python **3.10 or higher** (3.10–3.13 are supported). Python 3.11+ is recommended for best performance and compatibility.
 
 </Accordion>
 
@@ -119,7 +119,7 @@ If you're on an older version, install extras individually: `pip install "semant
 
 | Requirement | Minimum | Recommended |
 | :----------- | :------- | :----------- |
-| Python | 3.8 | 3.11+ |
+| Python | 3.10 | 3.11+ |
 | RAM | 4 GB | 16 GB+ |
 | Storage | 2 GB | 20 GB+ |
 | GPU | Optional | CUDA for embeddings and ML models |
@@ -271,7 +271,7 @@ Groq, OpenAI, Anthropic, Google Gemini, Ollama (fully local), DeepSeek, Novita A
 
 Yes. Every release ships with:
 
-- 1,000+ passing tests across Python 3.8–3.12
+- 1,000+ passing tests, with installs verified weekly on Python 3.10–3.13
 - `PipelineValidator` and `FailureHandler` with exponential backoff and configurable retry policies
 - W3C PROV-O provenance tracking across all modules
 - Change management with SHA-256 checksums and full audit trails
