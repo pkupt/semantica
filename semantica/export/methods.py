@@ -160,7 +160,7 @@ Example Usage:
 """
 
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from ..utils.exceptions import ProcessingError
 from ..utils.logging import get_logger
@@ -298,7 +298,7 @@ def export_csv(
     file_path: Union[str, Path],
     method: str = "default",
     **kwargs,
-) -> None:
+) -> Optional[List[Path]]:
     """
     Export data to CSV format (convenience function).
 
@@ -309,6 +309,12 @@ def export_csv(
         file_path: Output CSV file path (or base path for multiple files)
         method: Export method (default: "default")
         **kwargs: Additional options passed to CSVExporter
+
+    Returns:
+        The files written. A dictionary is written one file per key, so
+        ``file_path`` is a base name there and this is how the caller learns
+        what was actually produced. A registered custom method's own result is
+        returned in its place.
 
     Examples:
         >>> from semantica.export.methods import export_csv
@@ -331,7 +337,7 @@ def export_csv(
         config.update(kwargs)
 
         exporter = CSVExporter(**config)
-        exporter.export(data, file_path, **kwargs)
+        return exporter.export(data, file_path, **kwargs)
 
     except Exception as e:
         logger.error(f"Failed to export CSV: {e}")
@@ -343,7 +349,7 @@ def export_arrow(
     file_path: Union[str, Path],
     method: str = "default",
     **kwargs,
-) -> None:
+) -> Optional[List[Path]]:
     """
     Export data to Apache Arrow format (convenience function).
 
@@ -354,6 +360,12 @@ def export_arrow(
         file_path: Output Arrow file path (or base path for multiple files)
         method: Export method (default: "default")
         **kwargs: Additional options passed to ArrowExporter
+
+    Returns:
+        The files written. A dictionary is written one file per key, so
+        ``file_path`` is a base name there and this is how the caller learns
+        what was actually produced. A registered custom method's own result is
+        returned in its place.
 
     Examples:
         >>> from semantica.export.methods import export_arrow
@@ -376,7 +388,7 @@ def export_arrow(
         config.update(kwargs)
 
         exporter = ArrowExporter(**config)
-        exporter.export(data, file_path, **kwargs)
+        return exporter.export(data, file_path, **kwargs)
 
     except Exception as e:
         logger.error(f"Failed to export Arrow: {e}")
@@ -389,7 +401,7 @@ def export_parquet(
     compression: str = "snappy",
     method: str = "default",
     **kwargs,
-) -> None:
+) -> Optional[List[Path]]:
     """
     Export data to Apache Parquet format (convenience function).
 
@@ -408,6 +420,12 @@ def export_parquet(
             - "none": No compression
         method: Export method (default: "default")
         **kwargs: Additional options passed to ParquetExporter
+
+    Returns:
+        The files written. A dictionary is written one file per key, so
+        ``file_path`` is a base name there and this is how the caller learns
+        what was actually produced. A registered custom method's own result is
+        returned in its place.
 
     Examples:
         >>> from semantica.export.methods import export_parquet
@@ -436,7 +454,7 @@ def export_parquet(
         config.update(kwargs)
 
         exporter = ParquetExporter(compression=compression, **config)
-        exporter.export(data, file_path, **kwargs)
+        return exporter.export(data, file_path, **kwargs)
 
     except Exception as e:
         logger.error(f"Failed to export Parquet: {e}")
@@ -887,13 +905,47 @@ def generate_report(
 # rewrite records share one table instead of keeping their own copy.
 
 
+# Formats whose route writes one file per collection instead of ``file_path``
+# and returns the files it wrote, so a caller can report or read the real output
+# rather than the base name it passed. A caller with room for one artifact
+# (stdout, a single compressed file) cannot take their output, so it is told
+# before the export runs rather than after. Kept beside the routing table it
+# describes; a test checks it against what the routes actually write.
+MULTI_FILE_FORMATS: Tuple[str, ...] = ("arrow", "csv", "parquet")
+
+
+def _one_collection_per_kind(
+    knowledge_graph: Union[Dict[str, Any], List[Dict[str, Any]]],
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+    """Give a dictionary one collection per kind, not one per spelling.
+
+    A knowledge graph arrives under the ``entities``/``relationships`` names or
+    the ``nodes``/``edges`` ones, and the command hands over both because the
+    exporters it routes to read different pairs. Arrow and Parquet write one
+    file per key, so an alias holding the same collection as its canonical name
+    is written a second time. An alias holding something else is left alone: it
+    is a second collection, not a second spelling of the first.
+    """
+    if not isinstance(knowledge_graph, dict):
+        return knowledge_graph
+
+    projected = dict(knowledge_graph)
+    for alias, canonical in (("nodes", "entities"), ("edges", "relationships")):
+        if alias not in projected or canonical not in projected:
+            continue
+        alias_value, canonical_value = projected[alias], projected[canonical]
+        if alias_value is canonical_value or alias_value == canonical_value:
+            del projected[alias]
+    return projected
+
+
 def export_knowledge_graph(
     knowledge_graph: Dict[str, Any],
     file_path: Union[str, Path],
     format: Optional[str] = None,
     method: Optional[str] = None,
     **kwargs,
-) -> None:
+) -> Optional[List[Path]]:
     """
     Export knowledge graph to specified format (unified convenience function).
 
@@ -930,6 +982,12 @@ def export_knowledge_graph(
             exporter keeps its own default rather than being handed a value
             the caller never chose.
         **kwargs: Additional options passed to exporter
+
+        Returns:
+            The files an Arrow or Parquet route wrote, so a caller can report
+            or read them instead of the base name it passed; one file per
+            collection, which is not ``file_path``. The other routes write
+            ``file_path`` itself and return ``None``.
 
     Examples:
         >>> from semantica.export.methods import export_knowledge_graph
@@ -980,11 +1038,21 @@ def export_knowledge_graph(
     def _method_kwargs() -> Dict[str, Any]:
         return {} if method is None else {"method": method}
 
+    # Arrow and Parquet write one file per collection rather than one file at
+    # ``file_path``, so a caller that has to report or consume the output needs
+    # the paths back instead of the base name it passed.
+    written: Optional[List[Path]] = None
+
     # Route to appropriate exporter
     if format in ["json", "json-ld"]:
         export_json(knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs)
     elif format == "csv":
-        export_csv(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
+        written = export_csv(
+            _one_collection_per_kind(knowledge_graph),
+            file_path,
+            **_method_kwargs(),
+            **kwargs,
+        )
     elif format in ["turtle", "rdfxml", "jsonld", "ntriples", "n3"]:
         export_rdf(knowledge_graph, file_path, format=format, **_method_kwargs(), **kwargs)
     elif format in ["graphml", "gexf", "dot"]:
@@ -1011,11 +1079,23 @@ def export_knowledge_graph(
     elif format in ["aql", "arangodb"]:
         export_arango(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
     elif format == "arrow":
-        export_arrow(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
+        written = export_arrow(
+            _one_collection_per_kind(knowledge_graph),
+            file_path,
+            **_method_kwargs(),
+            **kwargs,
+        )
     elif format == "parquet":
-        export_parquet(knowledge_graph, file_path, **_method_kwargs(), **kwargs)
+        written = export_parquet(
+            _one_collection_per_kind(knowledge_graph),
+            file_path,
+            **_method_kwargs(),
+            **kwargs,
+        )
     else:
         raise ProcessingError(f"Unknown export format: {format}")
+
+    return written
 
 
 def get_export_method(task: str, name: str) -> Optional[Callable]:

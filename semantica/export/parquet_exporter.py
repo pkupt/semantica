@@ -179,7 +179,7 @@ class ParquetExporter:
         file_path: Union[str, Path],
         schema: Optional["pa.Schema"] = None,
         **options,
-    ) -> None:
+    ) -> List[Path]:
         """
         Export data to Parquet file(s).
 
@@ -196,6 +196,11 @@ class ParquetExporter:
 
         Raises:
             ValidationError: If data type is unsupported
+
+        Returns:
+            The files written. A dictionary is written one file per key, so
+            this is how a caller learns which files a multi-file export
+            produced; a list is written to ``file_path``.
 
         Example:
             >>> # Single Parquet file
@@ -223,7 +228,7 @@ class ParquetExporter:
             # Handle different data structures
             if isinstance(data, dict):
                 # Export each key as separate Parquet file
-                exported_files = []
+                exported_files: List[Path] = []
                 self.progress_tracker.update_tracking(
                     tracking_id, message=f"Exporting {len(data)} data groups..."
                 )
@@ -266,15 +271,13 @@ class ParquetExporter:
                         elif key == "relationships":
                             self.export_relationships(value, output_path, **options)
                         elif self._records_look_like_relationships(value[0]):
-                            # A key that is neither. export_knowledge_graph
-                            # hands the whole graph over in one dict
-                            # (entities, relationships, nodes, edges), so those
-                            # duplicate keys land here. Route them by record
-                            # shape, the same way the list branch below has
-                            # always done, rather than falling through to
-                            # _write_parquet with schema=None, which raises
-                            # "Schema is required" no matter what the records
-                            # hold.
+                            # A key that is neither. A caller may name a
+                            # collection anything it likes, and the shape of
+                            # the records is the only thing left to route on,
+                            # the same way the list branch below has always
+                            # done. Falling through to _write_parquet with
+                            # schema=None would raise "Schema is required" no
+                            # matter what the records hold.
                             self.export_relationships(value, output_path, **options)
                         else:
                             self.export_entities(value, output_path, **options)
@@ -295,6 +298,7 @@ class ParquetExporter:
                     status="completed",
                     message=f"Exported {len(exported_files)} Parquet files",
                 )
+                return exported_files
             elif isinstance(data, list):
                 # Single Parquet file - auto-detect if entities or relationships
                 self.progress_tracker.update_tracking(
@@ -332,6 +336,7 @@ class ParquetExporter:
                     status="completed",
                     message=f"Exported Parquet to: {file_path}",
                 )
+                return [file_path]
             else:
                 raise ValidationError(
                     f"Unsupported data type: {type(data)}. "
@@ -606,7 +611,7 @@ class ParquetExporter:
 
     def export_knowledge_graph(
         self, kg: Dict[str, Any], base_path: Union[str, Path], **options
-    ) -> None:
+    ) -> List[Path]:
         """
         Export knowledge graph to multiple Parquet files.
 
@@ -618,6 +623,11 @@ class ParquetExporter:
             kg: Knowledge graph dictionary with 'entities' and 'relationships' keys
             base_path: Base path for output files (without extension)
             **options: Additional options passed to export methods
+
+        Returns:
+            The files written, in the order they were exported. An empty
+            collection is not written, so a graph with no relationships
+            produces one file rather than two.
 
         Raises:
             ValidationError: If knowledge graph is missing required keys
@@ -679,6 +689,8 @@ class ParquetExporter:
                 status="completed",
                 message=f"Exported {len(exported_files)} Parquet files",
             )
+
+            return exported_files
 
         except Exception as e:
             self.progress_tracker.stop_tracking(

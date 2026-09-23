@@ -33,7 +33,7 @@ import pytest
 
 from semantica.cli import _EXPORT_FORMATS
 from semantica.export.endpoint_names import canonical_endpoints, has_endpoints
-from semantica.export.methods import export_knowledge_graph
+from semantica.export.methods import MULTI_FILE_FORMATS, export_knowledge_graph
 from semantica.utils.exceptions import ProcessingError
 
 NODES = [
@@ -202,19 +202,23 @@ class TestParquetAcceptsTheCommandShape:
     """``parquet`` is given the whole knowledge graph in one dict.
 
     ``entities``/``relationships`` are handled by key name, and the duplicate
-    ``nodes``/``edges`` keys the command adds reached
+    ``nodes``/``edges`` keys the command adds used to reach
     ``_write_parquet(schema=None)``, which always raised
-    ``Schema is required for Parquet export``.
+    ``Schema is required for Parquet export``. They name the same two
+    collections, so the router drops them before routing instead of writing
+    each collection a second time.
     """
 
-    def test_duplicate_collection_keys_do_not_abort_the_export(self, tmp_path):
+    def test_duplicate_collection_keys_are_not_written_as_well(self, tmp_path):
         pytest.importorskip("pyarrow", reason="the parquet writer needs pyarrow")
 
         export_knowledge_graph(cli_knowledge_graph(), str(tmp_path / "graph.parquet"))
 
         names = sorted(p.name for p in tmp_path.glob("graph*"))
-        assert any("relationships" in n for n in names), names
-        assert any("nodes" in n for n in names), names
+        assert names == [
+            "graph_entities.parquet",
+            "graph_relationships.parquet",
+        ], names
 
     def test_a_key_that_is_neither_entities_nor_relationships_is_routed_by_shape(
         self, tmp_path
@@ -441,3 +445,76 @@ class TestEntityOffsetsAreNotEndpoints:
         assert rows["id"] == ["e1", "e2"]
         assert rows["start"] == [0, 6]
         assert rows["end"] == [5, 9]
+
+
+class TestMultiFileFormats:
+    """The formats that write one file per collection.
+
+    ``arrow``, ``csv`` and ``parquet`` treat the path they are handed as a base
+    name: ``graph.arrow`` becomes ``graph_entities.arrow`` and
+    ``graph_relationships.arrow``, and ``graph.arrow`` itself is never created.
+    A caller therefore has to be told what was written rather than what it
+    asked for, and cannot send one of these formats to a single destination.
+    """
+
+    @pytest.mark.parametrize("fmt", MULTI_FILE_FORMATS)
+    def test_writes_one_file_per_collection(self, tmp_path, fmt):
+        stem = f"base_{fmt}"
+        ext = FORMAT_EXTENSIONS[fmt]
+        target = tmp_path / f"{stem}{ext}"
+
+        export_knowledge_graph(cli_knowledge_graph(), str(target), format=fmt)
+
+        names = sorted(p.name for p in tmp_path.glob(f"{stem}*"))
+        assert names == [f"{stem}_entities{ext}", f"{stem}_relationships{ext}"], names
+        assert (
+            not target.exists()
+        ), "the path passed in is a base name, not the artifact"
+
+    @pytest.mark.parametrize("fmt", _EXPORT_FORMATS)
+    def test_returns_the_paths_it_wrote(self, tmp_path, fmt):
+        target = tmp_path / f"ret{FORMAT_EXTENSIONS[fmt]}"
+
+        written = export_knowledge_graph(cli_knowledge_graph(), str(target), format=fmt)
+
+        if fmt in MULTI_FILE_FORMATS:
+            assert written, f"{fmt} wrote files but reported none"
+            assert sorted(Path(p).name for p in written) == sorted(
+                p.name for p in tmp_path.glob("ret*")
+            )
+        else:
+            assert written is None, f"{fmt} writes the path it was given"
+
+    @pytest.mark.parametrize("fmt", _EXPORT_FORMATS)
+    def test_several_files_exactly_when_it_is_listed(self, tmp_path, fmt):
+        """``MULTI_FILE_FORMATS`` makes the command refuse a single destination,
+        so it has to agree with what the routes actually do."""
+        target = tmp_path / f"multi{FORMAT_EXTENSIONS[fmt]}"
+
+        export_knowledge_graph(cli_knowledge_graph(), str(target), format=fmt)
+
+        several = len(list(tmp_path.glob("multi*"))) > 1
+        assert several == (
+            fmt in MULTI_FILE_FORMATS
+        ), f"{fmt} wrote {several} files, listed={fmt in MULTI_FILE_FORMATS}"
+
+    @pytest.mark.parametrize("fmt", _EXPORT_FORMATS)
+    def test_a_graph_without_relationships_still_exports(self, tmp_path, fmt):
+        """Nothing to relate is not a failure (#1712).
+
+        Arrow refused an empty collection outright, so a graph whose nodes had
+        no edges between them could not be exported at all.
+        """
+        target = tmp_path / f"lonely{FORMAT_EXTENSIONS[fmt]}"
+
+        export_knowledge_graph(
+            cli_knowledge_graph(relationships=[]), str(target), format=fmt
+        )
+
+        files = _files(tmp_path, "lonely")
+        assert files, f"{fmt} wrote no file"
+        assert all(f.stat().st_size for f in files), f"{fmt} wrote an empty file"
+        # The entity ids, since the entity name lives in a nested property that
+        # the serializers do not all flatten.
+        blob = _blob(files)
+        assert "n1" in blob and "n2" in blob, f"{fmt} lost the entities"
