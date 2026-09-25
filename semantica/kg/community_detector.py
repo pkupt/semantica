@@ -844,23 +844,51 @@ class CommunityDetector:
     
     def _filter_nodes_by_labels(self, graph: Any, node_labels: Optional[List[str]]) -> List[str]:
         """Filter nodes by specified labels."""
+        nodes = self._graph_node_ids(graph)
+
         if node_labels is None:
-            return list(graph.nodes()) if hasattr(graph, 'nodes') else []
-        
+            return nodes
+
         filtered_nodes = []
-        for node in graph.nodes():
-            if hasattr(graph, 'nodes'):
-                node_data = graph.nodes[node]
-                if isinstance(node_data, dict):
-                    node_label = node_data.get('label') or node_data.get('type')
-                    if node_label in node_labels:
-                        filtered_nodes.append(node)
-                else:
-                    # Fallback - include all nodes if no label information
-                    filtered_nodes.append(node)
-        
+        for node in nodes:
+            node_label = self._node_label(graph, node)
+            if node_label in node_labels:
+                filtered_nodes.append(node)
+
         return filtered_nodes
-    
+
+    @staticmethod
+    def _graph_node_ids(graph: Any) -> List[str]:
+        """Return node ids for any supported graph.
+
+        NetworkX exposes ``nodes`` as a callable view, while
+        :class:`~semantica.context.context_graph.ContextGraph` exposes it as a
+        mapping keyed by node id.
+        """
+        nodes = getattr(graph, "nodes", None)
+        if nodes is None:
+            return []
+        if callable(nodes):
+            return list(nodes())
+        return list(nodes)
+
+    @staticmethod
+    def _node_label(graph: Any, node: str) -> Optional[str]:
+        """Read a node's label from either a mapping or an object.
+
+        NetworkX stores node attributes in a dict, while ``ContextGraph``
+        stores a :class:`~semantica.context.context_graph.ContextNode` dataclass
+        whose label is ``node_type``.
+        """
+        node_data = graph.nodes[node]
+        if isinstance(node_data, dict):
+            return node_data.get("label") or node_data.get("type")
+        for attribute in ("node_type", "label", "type"):
+            label = getattr(node_data, attribute, None)
+            if label:
+                return label
+        return None
+
     def _build_filtered_adjacency(
         self, 
         graph: Any, 
