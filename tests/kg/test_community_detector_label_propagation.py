@@ -67,3 +67,42 @@ def test_runs_on_a_context_graph_with_relationship_types():
     )
 
     assert set(result["node_assignments"]) == {"alice", "bob", "carol"}
+
+
+def test_relationship_filter_sees_parallel_edges_on_a_context_graph():
+    graph = ContextGraph()
+    graph.add_node("alice", "person", "Alice")
+    graph.add_node("bob", "person", "Bob")
+    graph.add_node("carol", "person", "Carol")
+    # alice - bob carries two edges. The first one does not match the filter,
+    # so a lookup that reads only the first stored edge drops the pair and
+    # leaves alice isolated.
+    graph.add_edge("alice", "bob", "knows")
+    graph.add_edge("alice", "bob", "mentors")
+    graph.add_edge("carol", "bob", "knows")
+
+    result = CommunityDetector().detect_communities_label_propagation(
+        graph, relationship_types=["mentors"]
+    )
+
+    assignments = result["node_assignments"]
+    assert assignments["alice"] == assignments["bob"]
+    assert assignments["carol"] != assignments["bob"]
+
+
+def test_relationship_filter_sees_parallel_edges_on_a_multigraph():
+    graph = nx.MultiGraph()
+    graph.add_node("a", label="person")
+    graph.add_node("b", label="person")
+    graph.add_node("c", label="person")
+    graph.add_edge("a", "b", type="knows")
+    graph.add_edge("a", "b", type="mentors")
+    graph.add_edge("c", "b", type="knows")
+
+    result = CommunityDetector().detect_communities_label_propagation(
+        graph, relationship_types=["mentors"]
+    )
+
+    assignments = result["node_assignments"]
+    assert assignments["a"] == assignments["b"]
+    assert assignments["c"] != assignments["b"]
