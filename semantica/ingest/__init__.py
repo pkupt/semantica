@@ -161,6 +161,7 @@ from .file_ingestor import (
     FileObject,
     FileTypeDetector,
 )
+from ..utils.exceptions import PartialIngestionWarning
 from .methods import (
     get_ingest_method,
     ingest,
@@ -452,6 +453,7 @@ __all__ = [
     "FileObject",
     "FileTypeDetector",
     "CloudStorageIngestor",
+    "PartialIngestionWarning",
     # Web ingestion
     "WebIngestor",
     "WebContent",
