@@ -13,6 +13,7 @@ node ids straight off ``graph.nodes``, found none, and the dispatched calls came
 back with ``No nodes found matching the specified criteria``.
 """
 
+import networkx as nx
 import pytest
 
 from semantica.context.context_graph import ContextGraph
@@ -216,3 +217,38 @@ def test_chunked_label_propagation_reports_the_requested_algorithm():
     )
 
     assert result["algorithm"] == "label_propagation"
+
+
+def _partition(result):
+    return sorted(sorted(community) for community in result["communities"])
+
+
+def test_chunked_label_propagation_keeps_the_edges_between_chunks():
+    # Chunking is an execution detail: an edge that joins two chunks has to
+    # still make its two endpoints neighbours. A complete graph is a single
+    # community whether it is walked whole or a few nodes at a time.
+    graph = nx.complete_graph(6)
+
+    whole = CommunityDetector().detect_communities(
+        graph, method="label_propagation", random_seed=7
+    )
+    chunked = CommunityDetector().detect_communities(
+        graph, method="label_propagation", chunk_size=3, random_seed=7
+    )
+
+    assert _partition(whole) == [[0, 1, 2, 3, 4, 5]]
+    assert _partition(chunked) == _partition(whole)
+
+
+def test_chunked_adjacency_keeps_a_neighbour_from_another_chunk():
+    # A chunk's rows are built against the whole node set, so a neighbour
+    # that sits in the next chunk is still returned as a neighbour.
+    graph = nx.path_graph(4)
+    detector = CommunityDetector()
+
+    chunked = detector._build_filtered_adjacency(
+        graph, [0, 1, 2, 3], None, iterate=[0, 1]
+    )
+
+    assert sorted(chunked[0]) == [1]
+    assert sorted(chunked[1]) == [0, 2]
