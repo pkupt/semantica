@@ -428,6 +428,23 @@ def _pagerank_rankings(result: object) -> list:
     return sorted(scores.items(), key=lambda item: item[1], reverse=True)
 
 
+def _community_count(result: object) -> int:
+    """Return the number of communities in a ``detect_communities`` result.
+
+    ``CommunityDetector.detect_communities`` returns a wrapper dict
+    (``communities``, ``node_assignments``, ``modularity``, ``algorithm``), so
+    taking ``len()`` of the whole result gives the key count, which is 4 for
+    every graph and every algorithm. A bare list of groups is still accepted.
+    """
+    if isinstance(result, dict):
+        groups = result.get("communities")
+    elif isinstance(result, list):
+        groups = result
+    else:
+        return 0
+    return len(groups) if isinstance(groups, list) else 0
+
+
 def _tool_get_graph_analytics(args: dict) -> dict:
     """Compute graph analytics: centrality, community detection, metrics."""
     graph = _get_graph()
@@ -443,7 +460,7 @@ def _tool_get_graph_analytics(args: dict) -> dict:
             "node_count": node_count,
             "edge_count": edge_count,
             "top_nodes_by_pagerank": _pagerank_rankings(centrality)[:10],
-            "community_count": len(communities) if isinstance(communities, (list, dict)) else 0,
+            "community_count": _community_count(communities),
         }
     except Exception as exc:
         return {"error": str(exc)}
