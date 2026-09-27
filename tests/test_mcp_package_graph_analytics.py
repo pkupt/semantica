@@ -80,6 +80,17 @@ class TestPagerankAcceptsContextGraph(unittest.TestCase):
                 self.assertEqual(set(result["centrality"]), {"alice", "bob", "acme"})
 
 
+def _make_two_node_graph():
+    """The smallest connected graph: two nodes, one edge (issue #1761)."""
+    from semantica.context.context_graph import ContextGraph
+
+    graph = ContextGraph()
+    graph.add_node("a", "person", "A")
+    graph.add_node("b", "person", "B")
+    graph.add_edge("a", "b", "knows")
+    return graph
+
+
 class TestGraphAnalyticsTool(unittest.TestCase):
     """Defect 2: the handler mis-unpacked the calculator results."""
 
@@ -122,6 +133,30 @@ class TestGraphAnalyticsTool(unittest.TestCase):
     def test_top_n_is_respected(self):
         result = self._call_handler({"metrics": ["degree"], "top_n": 1})
         self.assertEqual(len(result["degree"]), 1)
+
+    def test_two_node_graph_reports_its_one_community(self):
+        """A connected pair is one community. #1761 saw it reported as four.
+
+        ``community_count`` came from ``len()`` of the result wrapper, whose
+        four keys have nothing to do with the grouping, and ``communities``
+        was forced to ``[]`` because the wrapper is not a list.
+        """
+        from semantica_mcp.mcp.tools import graph as graph_tools
+
+        graph = _make_two_node_graph()
+        with patch.object(graph_tools, "get_graph", return_value=graph):
+            result = graph_tools.handle_get_graph_analytics(
+                {"metrics": ["all"], "top_n": 5}
+            )
+
+        for key in ("pagerank", "betweenness", "degree"):
+            with self.subTest(metric=key):
+                self.assertNotIn(f"{key}_error", result)
+                self.assertEqual(len(result[key]), 2)
+        self.assertNotIn("communities_error", result)
+        self.assertEqual(result["community_count"], 1)
+        self.assertEqual(result["communities"], [["a", "b"]])
+        json.dumps(result)
 
 
 if __name__ == "__main__":
