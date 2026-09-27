@@ -5,12 +5,12 @@ result. That result is a wrapper dict (`communities`, `node_assignments`,
 `modularity`, `algorithm`), so the tool reported the key count — 4 for every
 graph and every algorithm — instead of the number of communities.
 
-The line is unreachable on `main`: `calculate_pagerank` raises first on a
-ContextGraph (issue #1721) and, once that call returns, the sort feeding
-`top_nodes_by_pagerank` raises next (issue #1747). These tests stub PageRank
-with a flat mapping so the handler reaches the community line on its own. The
-stub is deliberately the flat shape, which both the old sort and the #1747
-ranking helper accept, so the file keeps working after that fix lands.
+The line is unreachable through the real calculator on `main`: the sort feeding
+`top_nodes_by_pagerank` raises first on a ContextGraph (issue #1747). Before
+#1744 the failure happened one step earlier, inside `calculate_pagerank` itself
+(issue #1721). These tests stub PageRank with a flat mapping, which both the old
+sort and the #1747 ranking helper accept, so the handler reaches the community
+line however those two fixes land.
 """
 
 import unittest
