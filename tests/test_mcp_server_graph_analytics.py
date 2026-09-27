@@ -111,6 +111,18 @@ class TestGraphAnalyticsOnARealContextGraph(unittest.TestCase):
         # survive a plain dump with no encoder of its own.
         json.dumps(result)
 
+    def test_keeps_the_error_response_for_an_empty_graph(self):
+        """An empty graph still surfaces the calculator's own message.
+
+        This one holds on the base revision too. It is here to pin the
+        contract rather than to show the ranking fix, so that a later change
+        cannot quietly turn an empty graph into a zero-filled response.
+        """
+        mcp_server._graph = ContextGraph(advanced_analytics=True)
+        result = mcp_server._tool_get_graph_analytics({})
+        self.assertIn("error", result)
+        self.assertIn("No nodes found", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
