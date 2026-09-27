@@ -9,12 +9,14 @@ The handler sorted that outer mapping instead, so its two entries (`centrality`,
 a dict, and `rankings`, a list) were compared with each other and the sort raised
 `'<' not supported between instances of 'dict' and 'list'`.
 
-On `main` the failure is masked: `calculate_pagerank` raises before the handler
-reaches the sort line (that is issue #1721). These tests pin the handler on its
-own by stubbing the PageRank call, so the ranking path is covered without
-depending on the ContextGraph conversion fix in #1744.
+Before #1744 the failure was masked: `calculate_pagerank` raised on a
+ContextGraph before the handler reached the sort line (that was issue #1721).
+`TestGraphAnalyticsRankings` stubs the PageRank call so the ranking path is
+pinned on its own; `TestGraphAnalyticsOnARealContextGraph` runs the whole path,
+which is reachable now that #1744 is on `main`.
 """
 
+import json
 import unittest
 from unittest import mock
 
@@ -81,6 +83,33 @@ class TestGraphAnalyticsRankings(unittest.TestCase):
         self.assertNotIn("error", result, result)
         self.assertEqual(result["node_count"], 3)
         self.assertEqual(result["edge_count"], 3)
+
+
+class TestGraphAnalyticsOnARealContextGraph(unittest.TestCase):
+    """The tool end to end, with no stubbed calculator."""
+
+    def setUp(self):
+        self._old_graph = mcp_server._graph
+        mcp_server._graph = _graph()
+
+    def tearDown(self):
+        mcp_server._graph = self._old_graph
+
+    def test_ranks_the_nodes_and_serialises_to_json(self):
+        result = mcp_server._tool_get_graph_analytics({})
+        self.assertNotIn("error", result, result)
+        self.assertEqual(result["node_count"], 3)
+        self.assertEqual(result["edge_count"], 3)
+        self.assertEqual(result["community_count"], 1)
+
+        ranked = result["top_nodes_by_pagerank"]
+        self.assertEqual({node for node, _ in ranked}, {"alice", "bob", "acme"})
+        scores = [score for _, score in ranked]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+        # The response goes straight out over the MCP transport, so it has to
+        # survive a plain dump with no encoder of its own.
+        json.dumps(result)
 
 
 if __name__ == "__main__":
