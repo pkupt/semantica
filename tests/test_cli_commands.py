@@ -673,6 +673,52 @@ class TestExtract:
         data = _json_output(result)
         assert set(data) == {"ner", "relations", "triplets", "events"}
 
+    def test_all_mode_reuses_ner_and_relations(self, runner, monkeypatch):
+        """#1789 (Qodo) — 'all' must not recompute NER/relations per stage."""
+        calls = {"ner": 0, "relations": 0, "triplets": 0}
+        seen = {}
+        ner_result = [MagicMock(text="Alice", label="PER", confidence=0.9,
+                                start_char=0, end_char=5, metadata={})]
+        relation_result = [MagicMock(subject="Alice", predicate="works_at",
+                                     object="Acme", confidence=0.9, metadata={})]
+
+        def _triplet_extract(text, entities=None, relations=None, **kw):
+            seen["entities"] = entities
+            seen["relations"] = relations
+            return []
+
+        fake_ext = _fake_module(
+            NERExtractor=lambda **kw: (
+                calls.__setitem__("ner", calls["ner"] + 1)
+                or MagicMock(extract=lambda text, **kw2: ner_result)
+            ),
+            RelationExtractor=lambda **kw: (
+                calls.__setitem__("relations", calls["relations"] + 1)
+                or MagicMock(extract=lambda text, entities=None, **kw2: relation_result)
+            ),
+            TripletExtractor=lambda **kw: (
+                calls.__setitem__("triplets", calls["triplets"] + 1)
+                or MagicMock(extract=_triplet_extract)
+            ),
+            EventDetector=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+        )
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.semantic_extract", fake_ext
+        )
+        result = runner.invoke(
+            cli_module.main, ["extract", "Alice works at Acme.", "--json"]
+        )
+        _ok(result)
+        # NER (for the ner stage) and relations run once each; the triplet
+        # stage reuses their output instead of building a second NER/relation
+        # extractor of its own.
+        assert calls["ner"] == 1
+        assert calls["relations"] == 1
+        assert calls["triplets"] == 1
+        # ...and the triplet stage actually received that shared output.
+        assert seen["entities"] is ner_result
+        assert seen["relations"] is relation_result
+
     def test_import_error_is_clean(self, runner):
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
             (_ for _ in ()).throw(ImportError(n))
