@@ -1394,6 +1394,14 @@ class SHACLGenerator:
     # ── Helper ────────────────────────────────────────────────────────────────
 
     def _resolve_xsd(self, range_str: str) -> str:
-        """Map ontology range strings to xsd:-prefixed datatypes."""
+        """Map ontology range strings to xsd:-prefixed datatypes.
+
+        A range that is already xsd-qualified (``xsd:string``) or that is an
+        absolute IRI is returned unchanged, so the prefix is never doubled
+        (#1788). Only a bare name such as ``string`` is mapped through the
+        alias table.
+        """
         key = range_str.lower().strip()
+        if key.startswith("xsd:") or "://" in range_str:
+            return range_str
         return self._XSD_ALIASES.get(key, f"xsd:{range_str}")
