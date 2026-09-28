@@ -652,6 +652,27 @@ class TestExtract:
         )
         _ok(result)
 
+    def test_default_mode_runs_every_extractor(self, runner, monkeypatch):
+        """#1789 — the default --mode all must dispatch, not raise."""
+        _ner_result = [MagicMock(text="Alice", label="PER", confidence=0.9,
+                                  start_char=0, end_char=5, metadata={})]
+        fake_ext = _fake_module(
+            NERExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: _ner_result),
+            RelationExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            TripletExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            EventDetector=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+        )
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.semantic_extract", fake_ext
+        )
+        # No --mode: fall back to the command default.
+        result = runner.invoke(
+            cli_module.main, ["extract", "Alice works at Acme.", "--json"]
+        )
+        _ok(result)
+        data = _json_output(result)
+        assert set(data) == {"ner", "relations", "triplets", "events"}
+
     def test_import_error_is_clean(self, runner):
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
             (_ for _ in ()).throw(ImportError(n))

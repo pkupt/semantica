@@ -2242,29 +2242,39 @@ def extract(
             if model:
                 extractor_config["llm_model"] = model
 
-            def _run_extraction() -> Any:
-                if mode == "triplets":
+            def _run_single(target: str) -> Any:
+                if target == "triplets":
                     extractor = TripletExtractor(
                         method=method, include_temporal=temporal, **extractor_config
                     )
                     return extractor.extract(text)
-                elif mode == "relations":
+                if target == "relations":
                     ner = NERExtractor(method=method, **extractor_config)
                     entities = ner.extract(text)
                     extractor = RelationExtractor(
                         method=method, confidence_threshold=confidence, **extractor_config
                     )
                     return extractor.extract(text, entities=entities)
-                elif mode == "ner":
+                if target == "ner":
                     extractor = NERExtractor(method=method, **extractor_config)
                     return extractor.extract(text)
-                elif mode == "events":
+                if target == "events":
                     extractor = EventDetector(method=method, **extractor_config)
                     return extractor.extract(text)
-                else:
-                    raise click.ClickException(
-                        f"Extraction mode '{mode}' is not yet wired to a runtime extractor."
-                    )
+                raise click.ClickException(
+                    f"Extraction mode '{target}' is not yet wired to a runtime extractor."
+                )
+
+            def _run_extraction() -> Any:
+                # 'all' is the default, so it must not be the one value that
+                # raises. Run every mode that has a runtime extractor and nest
+                # each result under its own key (#1789).
+                if mode == "all":
+                    return {
+                        name: _run_single(name)
+                        for name in ("ner", "relations", "triplets", "events")
+                    }
+                return _run_single(mode)
 
             if cli_ctx.quiet or cli_ctx.json_output:
                 result = _run_extraction()
