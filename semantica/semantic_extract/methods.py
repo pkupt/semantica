@@ -90,6 +90,7 @@ Main Functions:
     - extract_relations_huggingface: HuggingFace relation extraction
     - extract_relations_llm: LLM-based relation extraction
     - extract_triplets_pattern: Pattern-based triplet extraction
+    - extract_triplets_ml: ML-based (spaCy dependency) triplet extraction
     - extract_triplets_rules: Rule-based triplet extraction
     - extract_triplets_huggingface: HuggingFace triplet extraction
     - extract_triplets_llm: LLM-based triplet extraction
@@ -2531,6 +2532,41 @@ def extract_triplets_pattern(
     return triplets
 
 
+def extract_triplets_ml(
+    text: str,
+    entities: Optional[List[Entity]] = None,
+    relations: Optional[List[Relation]] = None,
+    **kwargs,
+) -> List[Triplet]:
+    """ML-based triplet extraction.
+
+    Mirrors what ``ml`` means for the entity and relation stages, where it is
+    the spaCy-backed backend: relations are resolved with dependency parsing
+    and every subject-predicate-object relation becomes a triplet. Relations
+    are generated here when the caller has none, so the method can also be
+    used on its own.
+    """
+    if relations is None and entities:
+        relations = extract_relations_dependency(text, entities, **kwargs)
+
+    triplets = []
+    for relation in relations or []:
+        triplets.append(
+            Triplet(
+                subject=relation.subject.text,
+                predicate=relation.predicate,
+                object=relation.object.text,
+                confidence=relation.confidence,
+                # Keep the relation's provenance (context, dependency path, …)
+                # but record the method the caller asked for last, so the
+                # output shows which method actually produced the triplet.
+                metadata={**relation.metadata, "extraction_method": "ml"},
+            )
+        )
+
+    return triplets
+
+
 def extract_triplets_rules(
     text: str, entities: Optional[List[Entity]] = None, **kwargs
 ) -> List[Triplet]:
@@ -2974,6 +3010,7 @@ def get_triplet_method(method_name: str):
     # Built-in methods
     builtin = {
         "pattern": extract_triplets_pattern,
+        "ml": extract_triplets_ml,  # ML (spaCy dependency) relations
         "rules": extract_triplets_rules,
         "huggingface": extract_triplets_huggingface,
         "llm": extract_triplets_llm,
