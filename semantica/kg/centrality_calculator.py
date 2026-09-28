@@ -645,20 +645,25 @@ class CentralityCalculator:
             row_indices = []
             col_indices = []
             data = []
+            has_outgoing = np.zeros(n, dtype=bool)
             
             for node in nodes:
                 source_idx = node_index[node]
                 neighbors = self._get_filtered_neighbors(graph, node, relationship_types)
                 
-                # Distribute PageRank equally among neighbors
-                if neighbors:
-                    weight = 1.0 / len(neighbors)
-                    for neighbor in neighbors:
-                        if neighbor in node_index:  # Only include filtered nodes
-                            target_idx = node_index[neighbor]
-                            row_indices.append(target_idx)
-                            col_indices.append(source_idx)
-                            data.append(weight)
+                # Distribute PageRank equally among the neighbours that survive
+                # the node filter. Counting the filtered-out ones too would send
+                # part of the mass to nodes outside the matrix, where it vanishes
+                # (issue #1759).
+                retained = [n for n in neighbors if n in node_index]
+                if retained:
+                    weight = 1.0 / len(retained)
+                    for neighbour in retained:
+                        target_idx = node_index[neighbour]
+                        row_indices.append(target_idx)
+                        col_indices.append(source_idx)
+                        data.append(weight)
+                        has_outgoing[source_idx] = True
             
             # Create sparse matrix
             adjacency = sparse.csr_matrix((data, (row_indices, col_indices)), shape=(n, n))
@@ -670,8 +675,19 @@ class CentralityCalculator:
             for iteration in range(max_iterations):
                 prev_pagerank = pagerank.copy()
                 
-                # PageRank formula: PR = (1 - d) * 1/n + d * A * PR
-                pagerank = (1 - damping_factor) / n + damping_factor * adjacency.dot(prev_pagerank)
+                # A node with no outgoing edge inside the current node set (a
+                # leaf, or a node whose neighbours were filtered out) has an
+                # empty column in the transition matrix, so its mass cannot
+                # flow on. Redistribute it uniformly, as standard PageRank does,
+                # otherwise the scores drift below 1 on a directed graph.
+                dangling_mass = prev_pagerank[~has_outgoing].sum()
+
+                # PageRank formula: PR = (1 - d) / n + d * A * PR + d * dangling / n
+                pagerank = (
+                    (1 - damping_factor) / n
+                    + damping_factor * adjacency.dot(prev_pagerank)
+                    + damping_factor * dangling_mass / n
+                )
                 
                 # Check convergence
                 diff = np.linalg.norm(pagerank - prev_pagerank)
