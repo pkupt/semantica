@@ -1243,6 +1243,25 @@ class SHACLGenerator:
             return f"<{resolved}>"
         return resolved
 
+    def _turtle_datatype(self, graph: SHACLGraph, datatype: str) -> str:
+        """
+        Turtle-facing datatype: angle brackets for IRIs, bare qname only if declared.
+
+        ``_resolve_xsd`` may hand back a declared prefix name (``xsd:string``) or
+        an absolute IRI, since #1788 leaves anything already qualified alone.
+        Interpolating the latter produced ``sh:datatype http://...#string ;``,
+        which RDFLib rejects as BadSyntax, and ``urn:`` / ``doi:`` came out as
+        undeclared prefixed names for the same reason. Turtle only allows a
+        prefix name when ``@prefix`` declared it, so anything else is bracketed.
+        """
+        value = datatype.strip()
+        prefix, separator, _ = value.partition(":")
+        if separator and prefix in graph.prefixes:
+            return value
+        if self._IRI_SCHEME_RE.match(value):
+            return f"<{value}>"
+        return value
+
     def _serialize_turtle(self, graph: SHACLGraph) -> str:
         lines = [self._prefix_decls(graph), ""]
         lines.append(f"<{graph.shapes_uri}> a owl:Ontology .")
@@ -1270,7 +1289,7 @@ class SHACLGenerator:
                 parts = ["    sh:property ["]
                 parts.append(f'        sh:path {self._uri(graph, ps.path, "property")} ;')
                 if ps.datatype:
-                    parts.append(f"        sh:datatype {ps.datatype} ;")
+                    parts.append(f"        sh:datatype {self._turtle_datatype(graph, ps.datatype)} ;")
                 if ps.class_:
                     parts.append(f'        sh:class {self._uri(graph, ps.class_, "class")} ;')
                 if ps.min_count is not None:
