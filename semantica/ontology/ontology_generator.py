@@ -828,6 +828,12 @@ class SHACLGenerator:
         "uri": "xsd:anyURI", "anyuri": "xsd:anyURI",
     }
 
+    #: An IRI begins with a scheme: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":".
+    #: Matching the scheme grammar (rather than looking for ``://``) also catches
+    #: absolute IRIs whose scheme is not followed by slashes, such as ``urn:``
+    #: and ``doi:``, and covers qualified names like ``xsd:string``.
+    _IRI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+
     def __init__(
         self,
         base_uri: str = "https://semantica.dev/shapes/",
@@ -1396,12 +1402,12 @@ class SHACLGenerator:
     def _resolve_xsd(self, range_str: str) -> str:
         """Map ontology range strings to xsd:-prefixed datatypes.
 
-        A range that is already xsd-qualified (``xsd:string``) or that is an
-        absolute IRI is returned unchanged, so the prefix is never doubled
-        (#1788). Only a bare name such as ``string`` is mapped through the
-        alias table.
+        A range that is already an IRI is returned unchanged, so the prefix is
+        never doubled (#1788). That covers both qualified names (``xsd:string``)
+        and absolute IRIs, including schemes that carry no slashes such as
+        ``urn:example:datatype``. Only a bare name such as ``string`` is mapped
+        through the alias table.
         """
-        key = range_str.lower().strip()
-        if key.startswith("xsd:") or "://" in range_str:
+        if self._IRI_SCHEME_RE.match(range_str.strip()):
             return range_str
-        return self._XSD_ALIASES.get(key, f"xsd:{range_str}")
+        return self._XSD_ALIASES.get(range_str.lower().strip(), f"xsd:{range_str}")

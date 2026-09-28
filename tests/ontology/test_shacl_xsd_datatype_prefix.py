@@ -32,6 +32,12 @@ def test_absolute_iri_range_is_left_alone(generator):
     assert generator._resolve_xsd(iri) == iri
 
 
+def test_scheme_without_slashes_is_left_alone(generator):
+    # A URN or DOI is an absolute IRI too, even without "//".
+    assert generator._resolve_xsd("urn:example:datatype") == "urn:example:datatype"
+    assert generator._resolve_xsd("doi:10.1000/182") == "doi:10.1000/182"
+
+
 def test_property_shape_carries_a_single_prefix(generator):
     shape = generator._build_property_shape(
         {"type": "datatype", "range": "xsd:string", "name": "title"}
