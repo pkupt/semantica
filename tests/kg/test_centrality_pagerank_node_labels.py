@@ -140,3 +140,43 @@ def test_pagerank_keeps_the_link_the_filter_asked_for():
     # Only alice→bob survives, so bob still receives score from alice. Dropping
     # that link leaves every node on the same base score instead.
     assert ranked["centrality"]["bob"] > ranked["centrality"]["alice"]
+
+
+def _opposite_direction_graph():
+    """Alice links to Bob one way, Bob links back with another type.
+
+    ``ContextGraph._adjacency`` is outgoing-only, so the two edges are two
+    separate neighbours in two separate directions, not one symmetric pair.
+    """
+    graph = ContextGraph()
+    graph.add_node("alice", "person", "Alice")
+    graph.add_node("bob", "person", "Bob")
+    graph.add_edge("alice", "bob", "knows")
+    graph.add_edge("bob", "alice", "responds_to")
+    return graph
+
+
+def test_relationship_filter_is_direction_aware():
+    """A reverse edge of another type never matches the requested type.
+
+    The edge-list lookup used to read the pair symmetrically, so
+    ``bob→alice responds_to`` matched ``alice→bob knows`` and Bob kept a link he
+    does not follow. On an outgoing adjacency walk only ``alice→bob`` counts.
+    """
+    graph = _opposite_direction_graph()
+    calculator = CentralityCalculator()
+
+    assert calculator._get_filtered_neighbors(graph, "alice", ["knows"]) == ["bob"]
+    assert calculator._get_filtered_neighbors(graph, "bob", ["knows"]) == []
+
+
+def test_pagerank_direction_is_respected_by_relationship_filter():
+    graph = _opposite_direction_graph()
+
+    ranked = CentralityCalculator().calculate_pagerank(
+        graph, relationship_types=["knows"]
+    )
+
+    # Only alice→bob carries "knows", so Bob keeps the score he receives and
+    # Alice does not get a phantom link back from Bob's "responds_to" edge.
+    assert ranked["centrality"]["bob"] > ranked["centrality"]["alice"]

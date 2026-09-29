@@ -737,10 +737,13 @@ class CentralityCalculator:
         # Filter by relationship types if specified. The edge list is the only
         # view that shows every parallel edge of a pair, and a graph whose edge
         # types cannot be read keeps its neighbours rather than dropping them.
+        # The neighbours come from an outgoing walk, so the lookup has to read
+        # the edges in that direction: a reverse edge of another type is not a
+        # link this node follows, and counting it flattens the ranking.
         wanted = set(relationship_types)
         filtered_neighbors = []
         for neighbor in neighbors:
-            types = edge_types_between(graph, node, neighbor)
+            types = edge_types_between(graph, node, neighbor, directed=True)
             if types is None or types & wanted:
                 filtered_neighbors.append(neighbor)
         return filtered_neighbors

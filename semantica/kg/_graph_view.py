@@ -238,13 +238,22 @@ def graph_node_label(graph: Any, node: Any) -> Optional[str]:
     return None
 
 
-def edge_types_between(graph: Any, source: Any, target: Any) -> Optional[Set[Any]]:
+def edge_types_between(
+    graph: Any, source: Any, target: Any, directed: bool = False
+) -> Optional[Set[Any]]:
     """Collect the relationship types of every edge between two nodes.
 
     Returns ``None`` when the graph exposes no edge types at all, because a
     caller cannot classify a link it has no metadata for. An empty set means the
     two nodes are joined by edges that declare no type. Callers keep the
     neighbour on ``None`` and apply the filter to a set.
+
+    ``directed`` narrows the edge-list lookup to edges that leave ``source`` and
+    enter ``target``. The default reads the pair as undirected, which is what a
+    community detector wants; a caller walking an outgoing adjacency list has to
+    pass ``directed=True``, or a reverse edge of another type reads as a match.
+    The NetworkX lookup further down is keyed by the direction it is called with
+    already, so the flag changes nothing there.
 
     ``ContextGraph`` keeps parallel edges and its ``get_edge_data()`` returns
     only the first one, so the edge list is the only view that shows them all.
@@ -259,9 +268,9 @@ def edge_types_between(graph: Any, source: Any, target: Any) -> Optional[Set[Any
         for edge in edges:
             src = getattr(edge, "source_id", None)
             dst = getattr(edge, "target_id", None)
-            if (src == source and dst == target) or (
-                src == target and dst == source
-            ):
+            forwards = src == source and dst == target
+            backwards = src == target and dst == source
+            if forwards or (backwards and not directed):
                 edge_type = getattr(edge, "edge_type", None)
                 if edge_type:
                     types.add(edge_type)
