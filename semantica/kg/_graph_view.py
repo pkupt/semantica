@@ -172,6 +172,37 @@ def _edge_endpoints(edge: Any) -> Optional[Tuple[Any, Any]]:
     return source, target
 
 
+def _edge_type_of(edge: Any) -> Any:
+    """Read an edge's relationship type from a mapping or an object."""
+    if isinstance(edge, dict):
+        return _first_value(
+            edge, "type", "edge_type", "relationship_type", "relationship"
+        )
+    return _first_attribute(
+        edge, "edge_type", "type", "relationship_type", "relationship"
+    )
+
+
+def _dict_edge_types(
+    graph: Dict[str, Any], source: Any, target: Any, directed: bool
+) -> Set[Any]:
+    """Collect the types of every declared edge between two nodes."""
+    types: Set[Any] = set()
+    for edge in _extract_edges(graph):
+        endpoints = _edge_endpoints(edge)
+        if endpoints is None:
+            continue
+        src, dst = endpoints
+        forwards = src == source and dst == target
+        backwards = src == target and dst == source
+        if not (forwards or (backwards and not directed)):
+            continue
+        edge_type = _edge_type_of(edge)
+        if edge_type:
+            types.add(edge_type)
+    return types
+
+
 def _node_id(value: Any) -> Any:
     if isinstance(value, dict):
         value = _first_value(
@@ -206,13 +237,37 @@ def _first_attribute(value: Any, *names: str) -> Any:
     return None
 
 
+def _label_of(node_data: Any) -> Optional[str]:
+    """Read a node label from a mapping entry or a node object."""
+    if isinstance(node_data, dict):
+        return _first_value(node_data, "label", "type", "node_type")
+    return _first_attribute(node_data, "node_type", "label", "type")
+
+
+def _dict_node_label(graph: Dict[str, Any], node: Any) -> Optional[str]:
+    """Read a node's label out of a plain graph dictionary."""
+    mapping = graph.get("nodes")
+    if isinstance(mapping, dict) and node in mapping:
+        return _label_of(mapping[node])
+
+    for value in _extract_nodes(graph):
+        if _node_id(value) == node:
+            return _label_of(value)
+    return None
+
+
 def graph_node_ids(graph: Any) -> List[Any]:
     """Return the node ids of any supported graph.
 
     NetworkX exposes ``nodes`` as a callable view, while
     :class:`~semantica.context.context_graph.ContextGraph` exposes it as a
-    mapping keyed by node id.
+    mapping keyed by node id. A plain ``{"entities": [...], "relationships":
+    [...]}`` mapping declares its nodes under ``entities``/``nodes`` instead, so
+    it is read through the same view builder the rest of the analytics use.
     """
+    if isinstance(graph, dict):
+        return list(build_graph_view(graph).nodes)
+
     nodes = getattr(graph, "nodes", None)
     if nodes is None:
         return []
@@ -226,16 +281,13 @@ def graph_node_label(graph: Any, node: Any) -> Optional[str]:
 
     NetworkX stores node attributes in a dict, while ``ContextGraph`` stores a
     :class:`~semantica.context.context_graph.ContextNode` dataclass whose label
-    is ``node_type``.
+    is ``node_type``. A plain graph dictionary keeps its entities under
+    ``entities``/``nodes``, so the label comes from the matching entry.
     """
-    node_data = graph.nodes[node]
-    if isinstance(node_data, dict):
-        return node_data.get("label") or node_data.get("type")
-    for attribute in ("node_type", "label", "type"):
-        label = getattr(node_data, attribute, None)
-        if label:
-            return label
-    return None
+    if isinstance(graph, dict):
+        return _dict_node_label(graph, node)
+
+    return _label_of(graph.nodes[node])
 
 
 def edge_types_between(
@@ -246,7 +298,8 @@ def edge_types_between(
     Returns ``None`` when the graph exposes no edge types at all, because a
     caller cannot classify a link it has no metadata for. An empty set means the
     two nodes are joined by edges that declare no type. Callers keep the
-    neighbour on ``None`` and apply the filter to a set.
+    neighbour on ``None`` and apply the filter to a set. A plain graph
+    dictionary is read through its ``relationships``/``edges`` entries.
 
     ``directed`` narrows the edge-list lookup to edges that leave ``source`` and
     enter ``target``. The default reads the pair as undirected, which is what a
@@ -260,6 +313,9 @@ def edge_types_between(
     NetworkX returns plain attributes for a simple graph and a key-to-attributes
     mapping for a multigraph.
     """
+    if isinstance(graph, dict):
+        return _dict_edge_types(graph, source, target, directed)
+
     edges = getattr(graph, "edges", None)
     if isinstance(edges, (list, tuple)) and any(
         hasattr(edge, "source_id") for edge in edges

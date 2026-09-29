@@ -180,3 +180,75 @@ def test_pagerank_direction_is_respected_by_relationship_filter():
     # Only alice→bob carries "knows", so Bob keeps the score he receives and
     # Alice does not get a phantom link back from Bob's "responds_to" edge.
     assert ranked["centrality"]["bob"] > ranked["centrality"]["alice"]
+
+
+def _graph_dict():
+    """``_context_graph()`` in its plain-dictionary shape."""
+    return {
+        "entities": [
+            {"id": "alice", "type": "person"},
+            {"id": "bob", "type": "person"},
+            {"id": "acme", "type": "organization"},
+        ],
+        "relationships": [
+            {"source_id": "alice", "target_id": "bob", "type": "knows"},
+            {"source_id": "bob", "target_id": "acme", "type": "works_at"},
+        ],
+    }
+
+
+def test_pagerank_reads_a_plain_graph_dict():
+    """A ``{"entities": ..., "relationships": ...}`` mapping stays a valid input.
+
+    ``graph_node_ids``, ``graph_node_label`` and ``edge_types_between`` only
+    understood ``graph.nodes``/``graph.edges``, so the dictionary shape that
+    ``build_graph_view`` has always handled raised
+    ``RuntimeError: No nodes found matching the specified criteria`` (#1835).
+    """
+    calculator = CentralityCalculator()
+
+    dict_scores = calculator.calculate_pagerank(_graph_dict())["centrality"]
+    context_scores = calculator.calculate_pagerank(_context_graph())["centrality"]
+
+    assert set(dict_scores) == {"alice", "bob", "acme"}
+    assert dict_scores == pytest.approx(context_scores)
+
+
+def test_node_labels_filter_a_plain_graph_dict():
+    result = CentralityCalculator().calculate_pagerank(
+        _graph_dict(), node_labels=["person"]
+    )
+
+    assert set(result["centrality"]) == {"alice", "bob"}
+
+
+def test_a_dict_entity_without_a_label_is_not_swept_in():
+    graph = _graph_dict()
+    graph["entities"].append({"id": "ghost"})
+
+    result = CentralityCalculator().calculate_pagerank(graph, node_labels=["person"])
+
+    assert set(result["centrality"]) == {"alice", "bob"}
+
+
+def test_dict_neighbour_walk_is_direction_aware():
+    calculator = CentralityCalculator()
+
+    assert calculator._get_filtered_neighbors(_graph_dict(), "alice", None) == ["bob"]
+    assert calculator._get_filtered_neighbors(_graph_dict(), "acme", None) == []
+
+
+def test_relationship_types_filter_a_plain_graph_dict():
+    """The dict's edge types are read, not silently dropped.
+
+    Reading the types through a NetworkX conversion strips them, and every
+    neighbour then falls to the same base score — a uniform, plausible-looking
+    result instead of the link the filter asked for.
+    """
+    ranked = CentralityCalculator().calculate_pagerank(
+        _graph_dict(), relationship_types=["knows"]
+    )
+
+    scores = ranked["centrality"]
+    assert scores["bob"] > scores["alice"]
+    assert scores["bob"] > scores["acme"]

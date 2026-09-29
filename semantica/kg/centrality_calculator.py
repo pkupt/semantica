@@ -605,7 +605,8 @@ class CentralityCalculator:
         a page to determine a rough estimate of how important the website is.
         
         Args:
-            graph: Graph object (NetworkX or similar)
+            graph: Graph object (NetworkX, ContextGraph, or a plain
+                ``{"entities": [...], "relationships": [...]}`` mapping)
             node_labels: List of node labels to include (None for all)
             relationship_types: List of relationship types to consider (None for all)
             max_iterations: Maximum number of iterations for convergence
@@ -628,10 +629,10 @@ class CentralityCalculator:
         try:
             self.logger.info("Calculating PageRank scores")
 
-            # No conversion here. _filter_nodes_by_labels and
-            # _get_filtered_neighbors both read a ContextGraph through the
-            # _graph_view helpers, and _to_networkx re-adds nodes by id alone,
-            # so converting first would strip every label the filter needs.
+            # No conversion here. _to_networkx re-adds nodes by id alone, so
+            # converting first would strip every label and every relationship
+            # type the filters below need. The _graph_view helpers read a
+            # ContextGraph and a plain graph dictionary directly instead.
 
             # Filter nodes by labels if specified
             nodes = self._filter_nodes_by_labels(graph, node_labels)
@@ -718,7 +719,12 @@ class CentralityCalculator:
         relationship_types: Optional[List[str]]
     ) -> List[str]:
         """Get neighbors filtered by relationship types."""
-        if hasattr(graph, 'neighbors'):
+        if isinstance(graph, dict):
+            # A plain graph dictionary has no neighbour walk of its own, so the
+            # outgoing adjacency comes from the same dict-aware builder the rest
+            # of the analytics use.
+            neighbors = build_adjacency(graph, directed=True).get(node, [])
+        elif hasattr(graph, 'neighbors'):
             _raw = list(graph.neighbors(node))
             neighbors = [n.get("id") if isinstance(n, dict) else n for n in _raw]
         elif hasattr(graph, 'get_neighbors'):
