@@ -1528,6 +1528,7 @@ pip install "semantica[documents]"          # Document parsing (docx, openpyxl, 
 pip install "semantica[embeddings-local]"   # Local embeddings (sentence-transformers, fastembed, onnxruntime)
 pip install "semantica[models-huggingface]" # HuggingFace models (transformers, torch)
 pip install "semantica[nlp-spacy]"          # spaCy NLP pipelines (spacy)
+pip install "semantica[nlp-langdetect]"     # Language detection for LanguageDetector (langdetect)
 pip install "semantica[viz]"                # Visualization (matplotlib, seaborn, plotly, pyvis, graphviz)
 pip install "semantica[media]"              # Audio & computer vision (librosa, opencv-python)
 pip install "semantica[graph-embeddings]"   # Knowledge graph embeddings (gensim / Node2Vec)
