@@ -60,15 +60,37 @@ def test_pagerank_keeps_mass_when_relationship_filter_drops_edges(calculator):
     scores = _scores(calculator.calculate_pagerank(graph, relationship_types=["knows"]))
 
     assert sum(scores.values()) == pytest.approx(1.0)
+    # alice and bob stay symmetric and keep the only retained edge; acme is
+    # dangling once the 'works_for' edges are filtered out. Fixed point for
+    # the 3-node, d=0.85 walk: alice = bob = 0.4651, acme = 0.0698. Pinning the
+    # values (not just the sum) is what catches a wrong-but-normalised result.
+    assert scores["alice"] == pytest.approx(scores["bob"])
+    assert scores["alice"] == pytest.approx(0.4651, abs=1e-3)
+    assert scores["acme"] == pytest.approx(0.0698, abs=1e-3)
 
 
 @pytest.mark.parametrize("factory", [nx.Graph, nx.DiGraph])
 def test_pagerank_matches_networkx(calculator, factory):
     graph = factory([("a", "b"), ("b", "c"), ("c", "a"), ("c", "d")])
 
-    # The default cap is 20 iterations, which is not enough for this graph to
-    # settle; 200 converges. The remaining ~5e-7 gap is the calculator's own
-    # convergence tolerance, so compare with a margin above it.
+    # The default cap is 100, but this graph is small and the comparison wants
+    # a wide margin over the calculator's own 1e-6 convergence tolerance, so
+    # spell the cap out here.
     scores = _scores(calculator.calculate_pagerank(graph, max_iterations=200))
 
+    assert scores == pytest.approx(nx.pagerank(graph), abs=1e-5)
+
+
+def test_default_iterations_converge_on_a_directed_chain(calculator):
+    """A directed graph must settle on the default cap, not just sum to 1.
+
+    Every node but the last has a single successor, so a 10-node chain needs
+    ~33 power steps at tolerance=1e-6 -- more than the old default of 20. The
+    default is now 100, so the caller gets the fixed point without raising it.
+    """
+    graph = nx.DiGraph((str(i), str(i + 1)) for i in range(10))
+
+    scores = _scores(calculator.calculate_pagerank(graph))
+
+    assert sum(scores.values()) == pytest.approx(1.0)
     assert scores == pytest.approx(nx.pagerank(graph), abs=1e-5)
