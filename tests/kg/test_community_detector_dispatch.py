@@ -200,6 +200,77 @@ def test_graph_dict_honours_the_filter_when_its_edges_declare_types():
     ]
 
 
+def test_graph_dict_labels_filter_the_nodes():
+    # A graph dictionary carries its node labels on the node records. The
+    # filter used to read ``graph.nodes[node]``, an attribute a dict does not
+    # have, so every filtered call on a dictionary raised
+    # "Community detection failed: 'dict' object has no attribute 'nodes'"
+    # instead of matching the requested label.
+    graph = {
+        "nodes": [
+            {"id": "a", "label": "person"},
+            {"id": "b", "label": "person"},
+            {"id": "c", "label": "company"},
+            {"id": "d", "label": "company"},
+        ],
+        "edges": [("a", "b"), ("c", "d")],
+    }
+
+    result = CommunityDetector().detect_communities(
+        graph,
+        method="label_propagation",
+        node_labels=["person"],
+        random_seed=7,
+    )
+
+    assert result["algorithm"] == "label_propagation"
+    assert sorted(result["node_assignments"]) == ["a", "b"]
+
+
+def test_graph_dict_entities_are_read_through_the_shared_node_aliases():
+    # The same records may sit under "entities" and name their node through
+    # "node_id" while typing it through "type". The label lookup has to speak
+    # the aliases build_graph_view() already accepts, not just "id"/"label".
+    graph = {
+        "entities": [
+            {"node_id": "a", "type": "person"},
+            {"node_id": "b", "type": "person"},
+            {"node_id": "c", "type": "company"},
+        ],
+        "relationships": [("a", "b"), ("a", "c")],
+    }
+
+    result = CommunityDetector().detect_communities(
+        graph,
+        method="label_propagation",
+        node_labels=["company"],
+        random_seed=7,
+    )
+
+    assert result["algorithm"] == "label_propagation"
+    assert sorted(result["node_assignments"]) == ["c"]
+
+
+def test_graph_dict_without_labels_still_reports_no_match():
+    # Labels are read from the records the dictionary declares. When none of
+    # them can be matched, the call keeps reporting the same "no match" it
+    # always did rather than failing on the missing ``nodes`` attribute.
+    graph = {
+        "nodes": ["a", "b"],
+        "edges": [("a", "b")],
+    }
+
+    with pytest.raises(
+        RuntimeError, match="No nodes found matching the specified criteria"
+    ):
+        CommunityDetector().detect_communities(
+            graph,
+            method="label_propagation",
+            node_labels=["person"],
+            random_seed=7,
+        )
+
+
 def test_chunked_label_propagation_reports_the_requested_algorithm():
     # Chunking is an execution detail. A caller that asked for label
     # propagation must get that name back, whatever the graph size.
