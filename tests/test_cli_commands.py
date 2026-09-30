@@ -673,6 +673,68 @@ class TestExtract:
         data = _json_output(result)
         assert set(data) == {"ner", "relations", "triplets", "events"}
 
+    def test_mode_choices_include_all_and_coreference(self):
+        """#1850 — every advertised mode must be a real `--mode` choice.
+
+        `all` is the *default* mode, yet the smoke loop in
+        ``tests/verify_rich_cli.py`` used to hardcode a list that silently
+        omitted it — which is why #1789 shipped unnoticed. Pin the full
+        ``choices`` set (and the default) so that loop stays aligned with the
+        command contract.
+        """
+        mode_param = next(
+            p for p in cli_module.extract.params if p.name == "mode"
+        )
+        choices = list(mode_param.type.choices)
+        assert mode_param.default == "all"
+        assert "all" in choices, f"'all' missing from choices: {choices}"
+        assert set(choices) == {
+            "ner", "relations", "triplets", "events", "coreference", "all",
+        }
+
+    def test_explicit_all_mode_returns_every_stage(self, runner, monkeypatch):
+        """#1850 — an explicit `--mode all` (not just the default) runs all stages."""
+        _ner_result = [MagicMock(text="Alice", label="PER", confidence=0.9,
+                                  start_char=0, end_char=5, metadata={})]
+        fake_ext = _fake_module(
+            NERExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: _ner_result),
+            RelationExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            TripletExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            EventDetector=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+        )
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.semantic_extract", fake_ext
+        )
+        result = runner.invoke(
+            cli_module.main,
+            ["extract", "Alice works at Acme.", "--mode", "all", "--json"],
+        )
+        _ok(result)
+        assert set(_json_output(result)) == {"ner", "relations", "triplets", "events"}
+
+    def test_coreference_mode_is_a_clean_placeholder_error(self, runner, monkeypatch):
+        """#1850 — `coreference` is a listed choice but has no extractor yet.
+
+        Until it is wired it must fail with a clean "not yet wired" error (and
+        no traceback), rather than silently succeeding or crashing.
+        """
+        fake_ext = _fake_module(
+            NERExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            RelationExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            TripletExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            EventDetector=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+        )
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.semantic_extract", fake_ext
+        )
+        result = runner.invoke(
+            cli_module.main,
+            ["extract", "Alice works at Acme.", "--mode", "coreference"],
+        )
+        assert result.exit_code != 0
+        assert "Traceback" not in result.output
+        assert "not yet wired" in _flatten(result.output)
+
     def test_all_mode_reuses_ner_and_relations(self, runner, monkeypatch):
         """#1789 (Qodo) — 'all' must not recompute NER/relations per stage."""
         calls = {"ner": 0, "relations": 0, "triplets": 0}
