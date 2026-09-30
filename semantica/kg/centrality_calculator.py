@@ -584,7 +584,7 @@ class CentralityCalculator:
         graph: Any,
         node_labels: Optional[List[str]] = None,
         relationship_types: Optional[List[str]] = None,
-        max_iterations: int = 20,
+        max_iterations: int = 100,
         damping_factor: float = 0.85,
         tolerance: float = 1e-6,
         # Aliases used by some callers
@@ -602,7 +602,13 @@ class CentralityCalculator:
             graph: Graph object (NetworkX or similar)
             node_labels: List of node labels to include (None for all)
             relationship_types: List of relationship types to consider (None for all)
-            max_iterations: Maximum number of iterations for convergence
+            max_iterations: Maximum power-iteration steps. 20 is enough for small
+                undirected graphs, but a directed graph with sink nodes needs far
+                more before the per-node values settle (at tolerance=1e-6 a
+                10-node directed chain needs ~33 steps and a 10-leaf directed
+                star ~85). The default of 100 lets those graphs converge without
+                the caller raising the cap. The scores always sum to 1 whether or
+                not convergence was reached.
             damping_factor: Probability of continuing random walk (0.85 is typical)
             tolerance: Convergence tolerance for PageRank values
             
