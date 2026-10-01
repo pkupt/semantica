@@ -652,6 +652,73 @@ class TestExtract:
         )
         _ok(result)
 
+    def test_default_mode_runs_every_extractor(self, runner, monkeypatch):
+        """#1789 — the default --mode all must dispatch, not raise."""
+        _ner_result = [MagicMock(text="Alice", label="PER", confidence=0.9,
+                                  start_char=0, end_char=5, metadata={})]
+        fake_ext = _fake_module(
+            NERExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: _ner_result),
+            RelationExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            TripletExtractor=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+            EventDetector=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+        )
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.semantic_extract", fake_ext
+        )
+        # No --mode: fall back to the command default.
+        result = runner.invoke(
+            cli_module.main, ["extract", "Alice works at Acme.", "--json"]
+        )
+        _ok(result)
+        data = _json_output(result)
+        assert set(data) == {"ner", "relations", "triplets", "events"}
+
+    def test_all_mode_reuses_ner_and_relations(self, runner, monkeypatch):
+        """#1789 (Qodo) — 'all' must not recompute NER/relations per stage."""
+        calls = {"ner": 0, "relations": 0, "triplets": 0}
+        seen = {}
+        ner_result = [MagicMock(text="Alice", label="PER", confidence=0.9,
+                                start_char=0, end_char=5, metadata={})]
+        relation_result = [MagicMock(subject="Alice", predicate="works_at",
+                                     object="Acme", confidence=0.9, metadata={})]
+
+        def _triplet_extract(text, entities=None, relations=None, **kw):
+            seen["entities"] = entities
+            seen["relations"] = relations
+            return []
+
+        fake_ext = _fake_module(
+            NERExtractor=lambda **kw: (
+                calls.__setitem__("ner", calls["ner"] + 1)
+                or MagicMock(extract=lambda text, **kw2: ner_result)
+            ),
+            RelationExtractor=lambda **kw: (
+                calls.__setitem__("relations", calls["relations"] + 1)
+                or MagicMock(extract=lambda text, entities=None, **kw2: relation_result)
+            ),
+            TripletExtractor=lambda **kw: (
+                calls.__setitem__("triplets", calls["triplets"] + 1)
+                or MagicMock(extract=_triplet_extract)
+            ),
+            EventDetector=lambda **kw: MagicMock(extract=lambda text, **kw2: []),
+        )
+        monkeypatch.setitem(
+            __import__("sys").modules, "semantica.semantic_extract", fake_ext
+        )
+        result = runner.invoke(
+            cli_module.main, ["extract", "Alice works at Acme.", "--json"]
+        )
+        _ok(result)
+        # NER (for the ner stage) and relations run once each; the triplet
+        # stage reuses their output instead of building a second NER/relation
+        # extractor of its own.
+        assert calls["ner"] == 1
+        assert calls["relations"] == 1
+        assert calls["triplets"] == 1
+        # ...and the triplet stage actually received that shared output.
+        assert seen["entities"] is ner_result
+        assert seen["relations"] is relation_result
+
     def test_import_error_is_clean(self, runner):
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
             (_ for _ in ()).throw(ImportError(n))
@@ -1636,6 +1703,53 @@ class TestDecision:
                             "semantica.graph_store", fake_graph_store)
         result = runner.invoke(cli_module.main, ["decision", "list", "--format", "json"])
         _ok(result)
+
+    # (filter, matching category, decoy category the mangled filter also hits)
+    # lstrip("tag:") strips leading t/a/g/: characters, so "tag:auth" became
+    # "uth" — which still substring-matches "auth", but ALSO matches "south".
+    @pytest.mark.parametrize("tag,decoy", [
+        ("auth", "south"),
+        ("git", "editor"),
+        ("testing", "nesting"),
+        ("tag", "anything-at-all"),
+    ])
+    def test_query_tag_filter_does_not_match_on_mangled_prefix(
+        self, runner, monkeypatch, tag, decoy
+    ):
+        """--filter tag:<value> must strip the prefix, not leading characters."""
+        fake_dq = MagicMock()
+
+        def _decision(did, category):
+            d = MagicMock()
+            d.decision_id, d.scenario, d.category = did, "T", category
+            d.outcome, d.confidence = "ok", 1.0
+            return d
+
+        fake_dq.find_by_time_range.return_value = [
+            _decision("d1", tag), _decision("d2", decoy),
+        ]
+        monkeypatch.setitem(__import__("sys").modules,
+                            "semantica.context.decision_query",
+                            _fake_module(DecisionQuery=lambda *a, **kw: fake_dq))
+        monkeypatch.setitem(__import__("sys").modules, "semantica.graph_store",
+                            _fake_module(GraphStore=MagicMock(return_value=MagicMock())))
+
+        result = runner.invoke(
+            cli_module.main,
+            ["decision", "query", "--filter", f"tag:{tag}", "--format", "json"],
+        )
+        _ok(result)
+        ids = [d["id"] for d in json.loads(result.output)]
+        assert ids == ["d1"], (
+            f"tag:{tag} matched {decoy!r} too — the prefix was stripped as "
+            f"characters, leaving a shorter filter"
+        )
+
+    def test_query_tag_filter_value_strips_prefix_only(self):
+        assert cli_module._tag_filter_value("tag:auth") == "auth"
+        assert cli_module._tag_filter_value("tag:git") == "git"
+        assert cli_module._tag_filter_value("tag:tag") == "tag"
+        assert cli_module._tag_filter_value("plain") == "plain"
 
     def test_trace_import_error_is_clean(self, runner):
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
