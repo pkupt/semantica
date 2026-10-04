@@ -5,7 +5,7 @@ Tracks: file paths, pages, metadata, ingestion timestamps
 
 Usage:
     from semantica.ingest.ingest_provenance import PDFIngestorWithProvenance
-    
+
     ingestor = PDFIngestorWithProvenance(provenance=True)
     docs = ingestor.ingest("document.pdf")
 
@@ -13,7 +13,7 @@ Author: Semantica Contributors
 License: MIT
 """
 
-from typing import Optional, List
+from typing import Optional
 from datetime import datetime
 import uuid
 
@@ -51,12 +51,12 @@ class PDFIngestorWithProvenance(IngestProvenanceMixin):
         is_automated: bool = True,
         **config,
     ):
-        from .pdf_ingestor import PDFIngestor
+        from .file_ingestor import FileIngestor
 
         IngestProvenanceMixin.__init__(
             self, provenance=provenance, agent_id=agent_id, is_automated=is_automated
         )
-        self._ingestor = PDFIngestor(**config)
+        self._ingestor = FileIngestor(**config)
 
     def ingest(self, file_path: str, **kwargs):
         """Ingest PDF with provenance tracking."""
@@ -81,9 +81,9 @@ class PDFIngestorWithProvenance(IngestProvenanceMixin):
                         "pages": getattr(doc, 'page_count', None)
                     }
                 )
-        
+
         return docs
-    
+
     def __getattr__(self, name):
         return getattr(self._ingestor, name)
 
