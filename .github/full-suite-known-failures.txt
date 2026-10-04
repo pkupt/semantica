@@ -12,10 +12,11 @@
 # .github/workflows/ci.yml instead of being xfailed, and carry a marker so that
 # the step and the hook agree on which:
 #
-#   # deselect       the step always deselects the id. Used for the pair that
-#                    passes in isolation and only fails in a single-process
-#                    run, where a strict xfail would turn a legitimate pass
-#                    into a failure.
+#   # deselect       the step always deselects the id. Used where a strict xfail
+#                    would misjudge the entry: the pair that passes in isolation
+#                    and only fails in a single-process run, and the three
+#                    entries added below after this PR's own CI saw them pass on
+#                    the runner and report XPASS.
 #   # windows-only   the step deselects the id on Windows alone, and the hook
 #                    leaves it out on Linux, so there it runs and passes —
 #                    the only platform where the symlink rejection it covers is
@@ -97,7 +98,7 @@ tests/ingest/test_ingestors.py::TestWebIngestor::test_ingest_url
 # --- Local embedding backend unavailable offline ------------------------------
 # `128 != 384` and `'fallback' != 'sentence_transformers'`: the real model could
 # not be loaded in this environment, so the fallback backend answers instead.
-tests/test_embedding_providers.py::TestEmbeddingProviders::test_embedding_generator_config
+tests/test_embedding_providers.py::TestEmbeddingProviders::test_embedding_generator_config  # deselect
 tests/test_embedding_providers.py::TestEmbeddingProviders::test_sentence_transformers_default
 tests/test_model_selection.py::TestModelSelection::test_dynamic_switching
 tests/test_model_selection.py::TestModelSelection::test_generator_switching
@@ -110,10 +111,10 @@ tests/vector_store/test_backward_compatibility.py::TestVectorStoreBackwardCompat
 
 # --- Assertion drift in the test or its expectation ---------------------------
 tests/export/test_distance_exporter.py::test_hop_distance_no_warning_when_kg_unavailable
-tests/ingest/test_repo_ingestor_security.py::TestIsReservedNAT64Regression::test_nat64_local_prefix_not_blocked
+tests/ingest/test_repo_ingestor_security.py::TestIsReservedNAT64Regression::test_nat64_local_prefix_not_blocked  # deselect
 tests/integrations/agno/test_context_store.py::TestAgnoContextStoreUpsertNERAttributes::test_upsert_indexes_entity_label_as_type
 tests/integrations/agno/test_context_store.py::TestAgnoContextStoreUpsertNERAttributes::test_upsert_indexes_entity_text_not_repr
-tests/semantic_extract/test_cache_backends.py::test_zero_ttl_expires_immediately_on_both_backends
+tests/semantic_extract/test_cache_backends.py::test_zero_ttl_expires_immediately_on_both_backends  # deselect
 tests/vector_store/test_hybrid_similarity.py::TestHybridSimilarityCalculator::test_pearson_similarity_calculation
 tests/vector_store/test_vector_store.py::test_backend_mirroring_and_save
 
