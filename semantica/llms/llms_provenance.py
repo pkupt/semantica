@@ -17,11 +17,11 @@ Usage:
         GroqLLMWithProvenance,
         OpenAILLMWithProvenance
     )
-    
+
     # Enable provenance tracking
     llm = GroqLLMWithProvenance(provenance=True)
     response = llm.generate("What is artificial intelligence?")
-    
+
     # Provenance automatically tracks:
     # - Model used
     # - Token counts
@@ -41,7 +41,7 @@ Author: Semantica Contributors
 License: MIT
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 from datetime import datetime
 import time
 import uuid
@@ -50,11 +50,11 @@ import uuid
 class LLMProvenanceMixin:
     """
     Mixin to add provenance tracking to any LLM provider.
-    
+
     This mixin provides common provenance infrastructure for tracking
     LLM API calls including tokens, costs, and performance metrics.
     """
-    
+
     def __init__(
         self,
         provenance: bool = False,
@@ -129,7 +129,11 @@ class LLMProvenanceMixin:
                 metadata={
                     "model": getattr(self, 'model', 'unknown'),
                     "prompt_preview": prompt[:200] if len(prompt) > 200 else prompt,
-                    "response_preview": response_text[:200] if len(str(response_text)) > 200 else str(response_text),
+                    "response_preview": (
+                        response_text[:200]
+                        if len(str(response_text)) > 200
+                        else str(response_text)
+                    ),
                     **metadata
                 }
             )
@@ -138,15 +142,15 @@ class LLMProvenanceMixin:
 class GroqLLMWithProvenance(LLMProvenanceMixin):
     """
     Groq LLM with provenance tracking.
-    
+
     Wraps the original GroqLLM and tracks all API calls with complete metadata.
-    
+
     Example:
         >>> llm = GroqLLMWithProvenance(provenance=True, model="llama-3.1-70b")
         >>> response = llm.generate("Explain quantum computing")
         >>> # API call is tracked with model, tokens, cost, latency
     """
-    
+
     def __init__(
         self,
         provenance: bool = False,
@@ -168,15 +172,15 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
         )
         self._llm = Groq(**config)
         self.model = getattr(self._llm, 'model', 'groq')
-    
+
     def generate(self, prompt: str, **kwargs):
         """
         Generate response with provenance tracking.
-        
+
         Args:
             prompt: Input prompt
             **kwargs: Additional generation parameters
-            
+
         Returns:
             LLM response (same format as original GroqLLM)
         """
@@ -205,7 +209,11 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
                 response=response,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=(prompt_tokens + completion_tokens) if (prompt_tokens and completion_tokens) else None,
+                total_tokens=(
+                    (prompt_tokens + completion_tokens)
+                    if (prompt_tokens and completion_tokens)
+                    else None
+                ),
                 total_cost=total_cost,
                 latency_seconds=elapsed,
                 activity_started_at_time=activity_started_at_time,
@@ -214,9 +222,9 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
                 max_tokens=kwargs.get('max_tokens'),
                 top_p=kwargs.get('top_p')
             )
-        
+
         return response
-    
+
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
         return getattr(self._llm, name)
@@ -225,10 +233,10 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
 class OpenAILLMWithProvenance(LLMProvenanceMixin):
     """
     OpenAI LLM with provenance tracking.
-    
+
     Wraps the original OpenAILLM and tracks all API calls.
     """
-    
+
     def __init__(
         self,
         provenance: bool = False,
@@ -250,15 +258,15 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
         )
         self._llm = OpenAI(**config)
         self.model = getattr(self._llm, 'model', 'openai')
-    
+
     def generate(self, prompt: str, **kwargs):
         """
         Generate response with provenance tracking.
-        
+
         Args:
             prompt: Input prompt
             **kwargs: Additional generation parameters
-            
+
         Returns:
             LLM response
         """
@@ -287,7 +295,11 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
                 response=response,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=(prompt_tokens + completion_tokens) if (prompt_tokens and completion_tokens) else None,
+                total_tokens=(
+                    (prompt_tokens + completion_tokens)
+                    if (prompt_tokens and completion_tokens)
+                    else None
+                ),
                 total_cost=total_cost,
                 latency_seconds=elapsed,
                 activity_started_at_time=activity_started_at_time,
@@ -295,9 +307,9 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
                 temperature=kwargs.get('temperature'),
                 max_tokens=kwargs.get('max_tokens')
             )
-        
+
         return response
-    
+
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
         return getattr(self._llm, name)
@@ -306,10 +318,10 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
 class HuggingFaceLLMWithProvenance(LLMProvenanceMixin):
     """
     HuggingFace LLM with provenance tracking.
-    
+
     Wraps the original HuggingFaceLLM and tracks all generations.
     """
-    
+
     def __init__(
         self,
         provenance: bool = False,
@@ -331,15 +343,15 @@ class HuggingFaceLLMWithProvenance(LLMProvenanceMixin):
         )
         self._llm = HuggingFaceLLM(**config)
         self.model = getattr(self._llm, 'model', 'huggingface')
-    
+
     def generate(self, prompt: str, **kwargs):
         """
         Generate response with provenance tracking.
-        
+
         Args:
             prompt: Input prompt
             **kwargs: Additional generation parameters
-            
+
         Returns:
             LLM response
         """
@@ -360,9 +372,9 @@ class HuggingFaceLLMWithProvenance(LLMProvenanceMixin):
                 max_length=kwargs.get('max_length'),
                 temperature=kwargs.get('temperature')
             )
-        
+
         return response
-    
+
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
         return getattr(self._llm, name)
@@ -371,10 +383,10 @@ class HuggingFaceLLMWithProvenance(LLMProvenanceMixin):
 class LiteLLMWithProvenance(LLMProvenanceMixin):
     """
     LiteLLM with provenance tracking.
-    
+
     Wraps the original LiteLLM and tracks all API calls across providers.
     """
-    
+
     def __init__(
         self,
         provenance: bool = False,
@@ -396,15 +408,15 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
         )
         self._llm = LiteLLM(**config)
         self.model = getattr(self._llm, 'model', 'litellm')
-    
+
     def generate(self, prompt: str, **kwargs):
         """
         Generate response with provenance tracking.
-        
+
         Args:
             prompt: Input prompt
             **kwargs: Additional generation parameters
-            
+
         Returns:
             LLM response
         """
@@ -424,7 +436,10 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
                 prompt_tokens = getattr(response.usage, 'prompt_tokens', None)
                 completion_tokens = getattr(response.usage, 'completion_tokens', None)
 
-            if hasattr(response, '_hidden_params') and 'response_cost' in response._hidden_params:
+            if (
+                hasattr(response, '_hidden_params')
+                and 'response_cost' in response._hidden_params
+            ):
                 total_cost = response._hidden_params['response_cost']
 
             self._track_llm_call(
@@ -439,9 +454,9 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
                 activity_ended_at_time=activity_ended_at_time,
                 provider=kwargs.get('provider')
             )
-        
+
         return response
-    
+
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
         return getattr(self._llm, name)
