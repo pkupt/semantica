@@ -161,12 +161,12 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
             provenance: Enable provenance tracking (default: False)
             **config: Configuration passed to original GroqLLM
         """
-        from .groq_llm import GroqLLM
+        from .groq import Groq
 
         LLMProvenanceMixin.__init__(
             self, provenance=provenance, agent_id=agent_id, is_automated=is_automated
         )
-        self._llm = GroqLLM(**config)
+        self._llm = Groq(**config)
         self.model = getattr(self._llm, 'model', 'groq')
     
     def generate(self, prompt: str, **kwargs):
@@ -243,12 +243,12 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
             provenance: Enable provenance tracking (default: False)
             **config: Configuration passed to original OpenAILLM
         """
-        from .openai_llm import OpenAILLM
+        from .openai import OpenAI
 
         LLMProvenanceMixin.__init__(
             self, provenance=provenance, agent_id=agent_id, is_automated=is_automated
         )
-        self._llm = OpenAILLM(**config)
+        self._llm = OpenAI(**config)
         self.model = getattr(self._llm, 'model', 'openai')
     
     def generate(self, prompt: str, **kwargs):
@@ -324,7 +324,7 @@ class HuggingFaceLLMWithProvenance(LLMProvenanceMixin):
             provenance: Enable provenance tracking (default: False)
             **config: Configuration passed to original HuggingFaceLLM
         """
-        from .huggingface_llm import HuggingFaceLLM
+        from .huggingface import HuggingFaceLLM
 
         LLMProvenanceMixin.__init__(
             self, provenance=provenance, agent_id=agent_id, is_automated=is_automated
@@ -389,7 +389,7 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
             provenance: Enable provenance tracking (default: False)
             **config: Configuration passed to original LiteLLM
         """
-        from .lite_llm import LiteLLM
+        from .litellm import LiteLLM
 
         LLMProvenanceMixin.__init__(
             self, provenance=provenance, agent_id=agent_id, is_automated=is_automated

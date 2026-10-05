@@ -7,6 +7,17 @@ Tests that provenance tracking works correctly for all LLM providers.
 import pytest
 
 
+class _StubProvider:
+    """Stand-in for the provider a wrapper's target class constructs.
+
+    Keeps these tests offline: constructing ``HuggingFaceLLM`` would otherwise
+    load (and download) a real model.
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+
 class TestGroqLLMProvenance:
     """Test Groq LLM with provenance."""
     
@@ -56,8 +67,13 @@ class TestOpenAILLMProvenance:
 class TestHuggingFaceLLMProvenance:
     """Test HuggingFace LLM with provenance."""
     
-    def test_without_provenance(self):
+    def test_without_provenance(self, monkeypatch):
         """Test HuggingFace LLM works without provenance."""
+        # Stub the provider so the wrapper can be exercised without loading a
+        # model; without this the test downloads ``gpt2`` on every run.
+        monkeypatch.setattr(
+            "semantica.llms.huggingface.HuggingFaceLLMProvider", _StubProvider
+        )
         try:
             from semantica.llms.llms_provenance import HuggingFaceLLMWithProvenance
             llm = HuggingFaceLLMWithProvenance(provenance=False)
