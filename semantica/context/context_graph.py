@@ -4441,6 +4441,11 @@ class ContextGraph:
         for key, value in kwargs.items():
             if not isinstance(key, str) or not key.strip():
                 raise ValueError("Additional field names must be non-empty strings")
+            if key == "id":
+                # kwargs are merged last into the decision mapping, so an "id"
+                # would replace the generated one and the returned id would no
+                # longer name the stored node.
+                raise ValueError("'id' is reserved; the decision id is generated")
             if len(key.strip()) > 100:
                 raise ValueError("Additional field names must be 100 characters or less")
             if len(str(value)) > 1000:
@@ -4938,111 +4943,136 @@ class ContextGraph:
     # --- Private helper methods for decision management ---
     
     def _add_decision_to_graph(self, decision: Dict[str, Any]) -> None:
-        """Add decision to context graph."""
-        try:
-            protected_properties = {
-                "category",
-                "scenario",
-                "reasoning",
-                "outcome",
-                "confidence",
-                "timestamp",
-                "decision_maker",
-            }
-            safe_metadata = {
-                key: value
-                for key, value in (decision.get("metadata") or {}).items()
-                if key not in protected_properties
-            }
-            extra_properties = {
-                key: value
-                for key, value in decision.items()
-                if key not in {
-                    "id",
-                    "category",
-                    "scenario",
-                    "reasoning",
-                    "outcome",
-                    "confidence",
-                    "entities",
-                    "decision_maker",
-                    "timestamp",
-                    "recorded_at",
-                    "valid_from",
-                    "valid_until",
-                    "metadata",
-                }
-            }
-            # Add decision node
-            self.add_node(
-                decision["id"],
-                "decision",
-                content=decision["scenario"],
-                valid_from=decision.get("valid_from"),
-                valid_until=decision.get("valid_until"),
-                category=decision["category"],
-                outcome=decision["outcome"],
-                confidence=decision["confidence"],
-                timestamp=decision["timestamp"],
-                scenario=decision["scenario"],
-                decision_maker=decision.get("decision_maker", ""),
-                reasoning=decision["reasoning"],
-                recorded_at=decision.get("recorded_at", ""),
-                **safe_metadata,
-                **extra_properties,
-            )
-            
-            # Add entity nodes and relationships
-            for entity in decision["entities"]:
-                # Add entity node if not exists
-                if not self.find_node(entity):
-                    self.add_node(
+        """Add decision to context graph.
+
+        All-or-nothing: on any failure the nodes and edges created by this call
+        are removed again and the exception is re-raised, so a decision is
+        never left half-stored and ``record_decision`` never reports success
+        for one that is not in the graph.
+        """
+        # Every name add_node() receives other than through **properties, plus
+        # the keywords passed explicitly below. A metadata key or **kwargs
+        # entry under one of these names would arrive twice and raise
+        # TypeError, so both mappings are filtered by the same set. "self" is
+        # included because a bound method rejects it as a keyword too.
+        node_properties = {
+            "self",
+            "node_id",
+            "node_type",
+            "content",
+            "category",
+            "scenario",
+            "reasoning",
+            "outcome",
+            "confidence",
+            "timestamp",
+            "decision_maker",
+            "recorded_at",
+            "valid_from",
+            "valid_until",
+        }
+        # Keys of the decision mapping handled structurally, not as node
+        # properties.
+        structural_keys = {"id", "entities", "metadata"}
+        safe_metadata = {
+            key: value
+            for key, value in (decision.get("metadata") or {}).items()
+            if key not in node_properties
+        }
+        extra_properties = {
+            key: value
+            for key, value in decision.items()
+            if key not in node_properties and key not in structural_keys
+        }
+
+        with self._lock:
+            nodes_before = set(self.nodes)
+            edges_before = len(self.edges)
+            try:
+                # Add decision node
+                if not self.add_node(
+                    decision["id"],
+                    "decision",
+                    content=decision["scenario"],
+                    valid_from=decision.get("valid_from"),
+                    valid_until=decision.get("valid_until"),
+                    category=decision["category"],
+                    outcome=decision["outcome"],
+                    confidence=decision["confidence"],
+                    timestamp=decision["timestamp"],
+                    scenario=decision["scenario"],
+                    decision_maker=decision.get("decision_maker", ""),
+                    reasoning=decision["reasoning"],
+                    recorded_at=decision.get("recorded_at", ""),
+                    **safe_metadata,
+                    **extra_properties,
+                ):
+                    raise ValueError(
+                        f"Decision node {decision['id']!r} was rejected by the graph"
+                    )
+
+                # Add entity nodes and relationships
+                for entity in decision["entities"]:
+                    # Add entity node if not exists
+                    if not self.find_node(entity):
+                        self.add_node(
+                            entity,
+                            "entity",
+                            name=entity
+                        )
+
+                    # Add relationship
+                    self.add_edge(
+                        decision["id"],
                         entity,
-                        "entity",
-                        name=entity
+                        "involves",
+                        confidence=decision["confidence"]
                     )
-                
-                # Add relationship
-                self.add_edge(
-                    decision["id"],
-                    entity,
-                    "involves",
-                    confidence=decision["confidence"]
-                )
-            
-            # Add category node and relationship
-            category_id = f"category_{decision['category']}"
-            if not self.find_node(category_id):
-                self.add_node(
-                    category_id,
-                    "category",
-                    name=decision["category"]
-                )
-            
-            self.add_edge(
-                decision["id"],
-                category_id,
-                "belongs_to"
-            )
-            
-            # Add decision maker node if provided
-            if decision.get("decision_maker"):
-                maker_id = f"maker_{decision['decision_maker']}"
-                if not self.find_node(maker_id):
+
+                # Add category node and relationship
+                category_id = f"category_{decision['category']}"
+                if not self.find_node(category_id):
                     self.add_node(
-                        maker_id,
-                        "decision_maker",
-                        name=decision["decision_maker"]
+                        category_id,
+                        "category",
+                        name=decision["category"]
                     )
-                
+
                 self.add_edge(
                     decision["id"],
-                    maker_id,
-                    "made_by"
+                    category_id,
+                    "belongs_to"
                 )
-            
-        except Exception as e:
-            self.logger.exception("Failed to add decision to graph")
+
+                # Add decision maker node if provided
+                if decision.get("decision_maker"):
+                    maker_id = f"maker_{decision['decision_maker']}"
+                    if not self.find_node(maker_id):
+                        self.add_node(
+                            maker_id,
+                            "decision_maker",
+                            name=decision["decision_maker"]
+                        )
+
+                    self.add_edge(
+                        decision["id"],
+                        maker_id,
+                        "made_by"
+                    )
+
+            except Exception:
+                # Do not swallow this. record_decision() has already generated
+                # the id it is about to return, so a silent failure here hands
+                # the caller a plausible identifier for a decision that is not
+                # in the graph. Undo the partial write first so a retry does
+                # not stack a second decision on top of orphaned nodes/edges.
+                self.logger.exception("Failed to add decision to graph")
+                for edge in list(self.edges[edges_before:]):
+                    self._drop_edge_from_indexes(edge)
+                    self._edge_index.pop(edge.edge_id, None)
+                for node_id in set(self.nodes) - nodes_before:
+                    self._drop_node_from_indexes(node_id)
+                raise
 
     def _decision_matches_temporal_filters(
         self,
