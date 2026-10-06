@@ -101,10 +101,13 @@ tests/vector_store/test_vector_store.py::test_backend_mirroring_and_save
 # `sqlalchemy` extra this job does not install, a fallback backend answering
 # because the real embedding model is offline, and two expectation drifts in
 # the deepdive suite.
+#
+# `test_06_hybrid_search` used to sit here: it failed because `HybridSearch`
+# dropped the `filter=` argument. #1827 fixed that, the test now passes on the
+# runner, and its line is gone.
 tests/ingest/test_notebook_02.py::TestNotebook02DataIngestion::test_03_web_ingestion
 tests/ingest/test_notebook_02.py::TestNotebook02DataIngestion::test_08_database_ingestion
 tests/test_all_features.py::TestSemanticaFeatures::test_03_model_switching
-tests/test_all_features.py::TestSemanticaFeatures::test_06_hybrid_search
 tests/test_semantic_extract_deepdive.py::TestSemanticExtractDeepDive::test_ner_extractor_pattern
 tests/test_semantic_extract_deepdive_part2.py::TestSemanticExtractDeepDivePart2::test_coreference_resolver_pronouns
 tests/test_semantic_extract_deepdive_part2.py::TestSemanticExtractDeepDivePart2::test_event_detector_basic
