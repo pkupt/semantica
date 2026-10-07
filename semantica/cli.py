@@ -1698,6 +1698,105 @@ def _graph_store_as_context(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any
     return {"entities": entities, "relationships": rel_out}
 
 
+def _knowledge_graph_dict(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any]]]:
+    """Entities and relationships for the configured graph backend.
+
+    Mirrors the routing `export` uses: the ``memory`` backend is served by the
+    in-process ContextGraph, every other backend by GraphStore. Callers that
+    only read entities and relationships (conflict detection, ontology
+    generation) go through here instead of `_graph_store_as_context`, which
+    raises for the default ``memory`` backend.
+    """
+    if _uses_memory_graph(cli_ctx):
+        kg = _load_context_graph(cli_ctx).to_kg_dict()
+        return {
+            "entities": kg.get("entities", []),
+            "relationships": kg.get("relationships", []),
+        }
+    return _graph_store_as_context(cli_ctx)
+
+
+def _ontology_from_graph(
+    cli_ctx: CLIContext, graph: Optional[Dict[str, List[Dict[str, Any]]]] = None
+) -> Dict[str, Any]:
+    """Build an ontology dict from the configured graph's entities/relationships."""
+    from .ontology import OntologyGenerator
+
+    data = graph if graph is not None else _knowledge_graph_dict(cli_ctx)
+    return OntologyGenerator(config=cli_ctx.config.to_dict()).generate_ontology(data)
+
+
+def _shacl_data_graph_turtle(
+    graph: Dict[str, List[Dict[str, Any]]], namespace: str
+) -> str:
+    """Serialize graph instances as Turtle in the ontology's own namespace.
+
+    `RDFSerializer` mints terms in its own vocabulary and drops entity
+    properties, so shapes generated from an ontology would target classes and
+    paths no exported graph carries. pySHACL treats a shape with zero matching
+    focus nodes as conforming, so that mismatch reads as a silent pass. Building
+    the data graph in the ontology's namespace keeps the two aligned, which is
+    what lets a real violation be reported instead of swallowed.
+    """
+    import rdflib
+
+    ns = rdflib.Namespace(namespace)
+    data = rdflib.Graph()
+    for entity in graph.get("entities", []):
+        node_id = entity.get("id") or entity.get("name") or entity.get("text")
+        if not node_id:
+            continue
+        subject = ns[str(node_id)]
+        data.add((subject, rdflib.RDF.type, ns[str(entity.get("type") or "Entity")]))
+        for key, value in (entity.get("properties") or {}).items():
+            if isinstance(value, (str, int, float, bool)):
+                data.add((subject, ns[str(key)], rdflib.Literal(value)))
+    for rel in graph.get("relationships", []):
+        source = rel.get("source_id") or rel.get("source")
+        target = rel.get("target_id") or rel.get("target")
+        if source is None or target is None:
+            continue
+        data.add(
+            (ns[str(source)], ns[str(rel.get("type") or "RELATED_TO")], ns[str(target)])
+        )
+    return data.serialize(format="turtle")
+
+
+def _shacl_shapes_turtle(
+    ontology: Dict[str, Any], shapes_path: Optional[str], strictness: str
+) -> str:
+    """Return the SHACL shapes as Turtle, from a file or derived from the ontology."""
+    if shapes_path:
+        return Path(shapes_path).read_text(encoding="utf-8")
+    from .ontology import OntologyEngine
+
+    tier = {"strict": "strict", "moderate": "standard", "lenient": "basic"}[strictness]
+    return OntologyEngine().to_shacl(ontology, format="turtle", quality_tier=tier)
+
+
+def _ontology_namespace(ontology: Dict[str, Any]) -> str:
+    """The vocabulary namespace the ontology's class and property IRIs live in.
+
+    Shapes generated from an ontology target those IRIs, and pySHACL treats a
+    shape with no matching focus node as satisfied, so a data graph minted in a
+    different namespace validates clean while checking nothing (#1104). The
+    graph's instances are serialized in this namespace to keep the two aligned.
+    """
+    declared = ontology.get("namespace")
+    if isinstance(declared, dict) and declared.get("base_uri"):
+        return str(declared["base_uri"])
+    if isinstance(declared, str) and declared:
+        return declared
+    entries = list(ontology.get("classes", [])) + list(ontology.get("properties", []))
+    for entry in entries:
+        uri = entry.get("uri") if isinstance(entry, dict) else None
+        if isinstance(uri, str) and "/" in uri:
+            return uri[: uri.rfind("/") + 1]
+    from .ontology.ontology_generator import DEFAULT_ONTOLOGY_BASE_URI
+
+    return DEFAULT_ONTOLOGY_BASE_URI
+
+
 def _lowercase_datalog_args(fact_str: str) -> str:
     """Lowercase only a fact string's arguments, keeping the predicate's
     case untouched.
@@ -4098,19 +4197,35 @@ def validate_shacl(cli_ctx: CLIContext, shapes: Optional[str], strictness: str,
 
     def _action() -> None:
         try:
-            from .ontology import OntologyValidator
-            v = OntologyValidator(config=cli_ctx.config.to_dict())
-            result = v.validate_shacl(shapes_file=shapes, strictness=strictness)
+            from .ontology import run_shacl_validation
         except ImportError as exc:
-            raise click.ClickException(f"Ontology/validation module not available: {exc}") from exc
-        payload = result if isinstance(result, dict) else {"valid": bool(result)}
+            raise click.ClickException(
+                f"Ontology/validation module not available: {exc}"
+            ) from exc
+        graph = _knowledge_graph_dict(cli_ctx)
+        ontology = _ontology_from_graph(cli_ctx, graph)
+        data_graph = _shacl_data_graph_turtle(graph, _ontology_namespace(ontology))
+        shapes_graph = _shacl_shapes_turtle(ontology, shapes, strictness)
+        try:
+            shacl_report = run_shacl_validation(data_graph, shapes_graph)
+        except ImportError as exc:
+            raise click.ClickException(
+                "SHACL validation needs pyshacl, which ships in the optional "
+                "'shacl' extra: pip install 'semantica[shacl]'"
+            ) from exc
+        payload = {
+            "conforms": shacl_report.conforms,
+            "violation_count": shacl_report.violation_count,
+            "violations": _serialize_extract_result(shacl_report.violations),
+            "warnings": _serialize_extract_result(shacl_report.warnings),
+        }
         if report:
             Path(report).write_text(json.dumps(payload, default=str), encoding="utf-8")
             _ok(cli_ctx, f"Wrote {report}")
         if _is_json(cli_ctx, local_json):
             _jecho(payload)
         else:
-            _pprint(cli_ctx, result)
+            _pprint(cli_ctx, payload)
 
     _run_with_error_handling(_action)
 
@@ -4120,11 +4235,23 @@ def validate_shacl(cli_ctx: CLIContext, shapes: Optional[str], strictness: str,
               type=click.Choice(["value", "property", "type", "relationship",
                                   "temporal", "logical", "entity", "all"]),
               default="all", show_default=True)
+@click.option(
+    "--property",
+    "property_name",
+    default=None,
+    help="Property to compare (value and property strategies).",
+)
 @click.option("--format", "fmt", type=click.Choice(["json", "table"]),
               default="json", show_default=True)
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def validate_conflicts(cli_ctx: CLIContext, strategy: str, fmt: str, local_json: bool) -> None:
+def validate_conflicts(
+    cli_ctx: CLIContext,
+    strategy: str,
+    property_name: Optional[str],
+    fmt: str,
+    local_json: bool,
+) -> None:
     """Detect value, type, temporal, and logical conflicts.
 
     \b
@@ -4135,14 +4262,25 @@ def validate_conflicts(cli_ctx: CLIContext, strategy: str, fmt: str, local_json:
 
     def _action() -> None:
         try:
-            from .conflicts import detect_conflicts
-            result = detect_conflicts(strategy=strategy, config=cli_ctx.config.to_dict())
+            from .conflicts import ConflictDetector
         except ImportError as exc:
             raise click.ClickException(f"Conflicts module not available: {exc}") from exc
+        graph = _knowledge_graph_dict(cli_ctx)
+        detector = ConflictDetector(config=cli_ctx.config.to_dict())
+        conflicts = detector.detect_conflicts(
+            graph,
+            method=strategy,
+            property_name=property_name,
+            relationships=graph.get("relationships", []),
+        )
+        payload = {
+            "conflicts": _serialize_extract_result(conflicts),
+            "count": len(conflicts),
+        }
         if _is_json(cli_ctx, local_json) or fmt == "json":
-            _jecho(result if isinstance(result, dict) else {"conflicts": result})
+            _jecho(payload)
         else:
-            _pprint(cli_ctx, result)
+            _pprint(cli_ctx, payload)
 
     _run_with_error_handling(_action)
 
@@ -4240,7 +4378,10 @@ def ontology_import(cli_ctx: CLIContext, source: str, fmt: Optional[str],
             return
         try:
             from .ontology import ingest_ontology
-            result = ingest_ontology(source, format=fmt, config=cli_ctx.config.to_dict())
+            ingest_kwargs: Dict[str, Any] = {}
+            if fmt:
+                ingest_kwargs["format"] = fmt
+            result = ingest_ontology(source, **ingest_kwargs)
         except ImportError as exc:
             raise click.ClickException(f"Ontology module not available: {exc}") from exc
         if _is_json(cli_ctx, local_json):
@@ -4252,24 +4393,26 @@ def ontology_import(cli_ctx: CLIContext, source: str, fmt: Optional[str],
 
 
 @ontology.command("validate")
-@click.option("--shapes", default=None, type=click.Path(exists=True))
-@click.option("--strictness", type=click.Choice(["strict", "moderate", "lenient"]),
-              default="moderate", show_default=True)
 @click.option("--report", default=None, type=click.Path())
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def ontology_validate(cli_ctx: CLIContext, shapes: Optional[str], strictness: str,
-                      report: Optional[str], local_json: bool) -> None:
-    """Run SHACL validation on the ontology."""
+def ontology_validate(
+    cli_ctx: CLIContext, report: Optional[str], local_json: bool
+) -> None:
+    """Check the generated ontology for consistency and satisfiability.
+
+    \b
+    Example:
+      semantica ontology validate --report ontology_report.json
+    """
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
         try:
             from .ontology import validate_ontology
-            result = validate_ontology(shapes_file=shapes, strictness=strictness,
-                                       config=cli_ctx.config.to_dict())
         except ImportError as exc:
             raise click.ClickException(f"Ontology module not available: {exc}") from exc
+        result = validate_ontology(_ontology_from_graph(cli_ctx))
         payload = result if isinstance(result, dict) else {"valid": bool(result)}
         if report:
             Path(report).write_text(json.dumps(payload, default=str), encoding="utf-8")
@@ -4277,7 +4420,7 @@ def ontology_validate(cli_ctx: CLIContext, shapes: Optional[str], strictness: st
         if _is_json(cli_ctx, local_json):
             _jecho(payload)
         else:
-            _pprint(cli_ctx, result)
+            _pprint(cli_ctx, payload)
 
     _run_with_error_handling(_action)
 
@@ -4293,11 +4436,11 @@ def ontology_shacl(cli_ctx: CLIContext, output: Optional[str], local_json: bool)
     def _action() -> None:
         try:
             from .ontology import SHACLGenerator
-            gen = SHACLGenerator(config=cli_ctx.config.to_dict())
-            result = gen.generate()
         except ImportError as exc:
             raise click.ClickException(f"Ontology module not available: {exc}") from exc
-        text = str(result)
+        generator = SHACLGenerator(config=cli_ctx.config.to_dict())
+        shapes_graph = generator.generate(_ontology_from_graph(cli_ctx))
+        text = generator.serialize(shapes_graph, format="turtle")
         if output:
             Path(output).write_text(text, encoding="utf-8")
             _ok(cli_ctx, f"Wrote {output}")
@@ -4410,15 +4553,15 @@ def ontology_health(cli_ctx: CLIContext, fmt: str, local_json: bool) -> None:
 
     def _action() -> None:
         try:
-            from .ontology import OntologyValidator
-            v = OntologyValidator(config=cli_ctx.config.to_dict())
-            result = v.health()
+            from .ontology import OntologyEngine
         except ImportError as exc:
             raise click.ClickException(f"Ontology module not available: {exc}") from exc
+        report = OntologyEngine().quality_check(_ontology_from_graph(cli_ctx))
+        payload = _serialize_extract_result(report)
         if _is_json(cli_ctx, local_json) or fmt == "json":
-            _jecho(result if isinstance(result, dict) else {"health": str(result)})
+            _jecho(payload if isinstance(payload, dict) else {"health": payload})
         else:
-            _pprint(cli_ctx, result)
+            _pprint(cli_ctx, payload)
 
     _run_with_error_handling(_action)
 
@@ -4433,10 +4576,15 @@ def ontology_version(cli_ctx: CLIContext, local_json: bool) -> None:
     def _action() -> None:
         try:
             from .change_management import OntologyVersionManager
-            v = OntologyVersionManager(**cli_ctx.config.to_dict())
-            result = v.current()
         except ImportError as exc:
-            raise click.ClickException(f"Change management module not available: {exc}") from exc
+            raise click.ClickException(
+                f"Change management module not available: {exc}"
+            ) from exc
+        versions = OntologyVersionManager(**cli_ctx.config.to_dict()).list_versions()
+        if versions:
+            result = max(versions, key=lambda s: str(s.get("timestamp") or ""))
+        else:
+            result = {"version": None, "message": "No ontology versions recorded yet."}
         if _is_json(cli_ctx, local_json):
             _jecho(result if isinstance(result, dict) else {"version": str(result)})
         else:
