@@ -36,6 +36,18 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture
+def graph_cfg(tmp_path) -> str:
+    """A config that points the memory graph backend at a throwaway file.
+
+    Keeps commands that read the configured graph away from the developer's own
+    ``~/.semantica/context_graph.json``.
+    """
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"graph_db:\n  backend: memory\n  path: {tmp_path / 'graph.json'}\n")
+    return str(cfg)
+
+
 @pytest.fixture(autouse=True)
 def silence_logging(monkeypatch):
     monkeypatch.setattr(cli_module, "setup_logging", lambda *a, **kw: None)
@@ -2333,15 +2345,72 @@ class TestValidate:
         assert result.exit_code != 0
         assert "Traceback" not in result.output
 
-    def test_conflicts_json(self, runner, monkeypatch):
-        fake_conf = _fake_module(
-            detect_conflicts=lambda **kw: {"conflicts": [], "count": 0},
+    def test_conflicts_json(self, runner, graph_cfg, monkeypatch):
+        """#1814: the CLI must call ConflictDetector, whose `all` method is the
+        command's default strategy. The module-level convenience function has no
+        `all` and no `property`, and it takes no config."""
+        import semantica.conflicts as conflicts_module
+
+        seen = {}
+
+        class _Detector:
+            def __init__(self, **kwargs):
+                seen["init"] = kwargs
+
+            def detect_conflicts(self, entities, **kwargs):
+                seen["entities"] = entities
+                seen["kwargs"] = kwargs
+                return []
+
+        monkeypatch.setattr(conflicts_module, "ConflictDetector", _Detector)
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
         )
-        monkeypatch.setitem(__import__("sys").modules, "semantica.conflicts", fake_conf)
-        result = runner.invoke(cli_module.main, ["validate", "conflicts", "--json"])
         _ok(result)
         data = _json_output(result)
-        assert isinstance(data, dict)
+        assert data == {"conflicts": [], "count": 0}
+        assert seen["kwargs"]["method"] == "all"
+        assert seen["kwargs"]["relationships"] == []
+
+    def test_conflicts_runs_against_the_configured_graph(self, runner, graph_cfg):
+        """#1814: detect_conflicts() was called without its `entities` argument."""
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
+        )
+        _ok(result)
+        data = _json_output(result)
+        assert data["count"] == 0
+        assert data["conflicts"] == []
+
+    def test_conflicts_property_strategy_is_reachable(self, runner, graph_cfg):
+        """The advertised value/property strategies need a property name."""
+        result = runner.invoke(
+            cli_module.main,
+            [
+                "--config",
+                graph_cfg,
+                "validate",
+                "conflicts",
+                "--strategy",
+                "value",
+                "--property",
+                "name",
+                "--json",
+            ],
+        )
+        _ok(result)
+        assert _json_output(result)["count"] == 0
+
+    def test_shacl_validation_runs_end_to_end(self, runner, graph_cfg):
+        """#1814: no SHACL validation was wired into the CLI at all."""
+        pytest.importorskip("pyshacl")
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "validate", "shacl", "--json"]
+        )
+        _ok(result)
+        data = _json_output(result)
+        assert data["conforms"] is True
+        assert data["violations"] == []
 
     def test_integrity_exits_0_with_import_error(self, runner):
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
@@ -2434,6 +2503,87 @@ class TestOntology:
             result = runner.invoke(cli_module.main, ["ontology", "health"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+
+    # ── #1814: the CLI drifted from the library's signatures ──────────────────
+
+    def test_import_ingests_a_turtle_file(self, runner, graph_cfg, tmp_path):
+        """#1814: the CLI forwarded its own config into rdflib's parser, so every
+        import died on `TurtleParser.parse() got an unexpected keyword 'config'`."""
+        schema = tmp_path / "schema.ttl"
+        schema.write_text(
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+            "@prefix ex: <http://example.org/> .\n"
+            "ex:Person a owl:Class .\n"
+        )
+        result = runner.invoke(
+            cli_module.main,
+            [
+                "--config",
+                graph_cfg,
+                "ontology",
+                "import",
+                str(schema),
+                "--format",
+                "turtle",
+                "--json",
+            ],
+        )
+        _ok(result)
+        assert _json_output(result)["status"] == "ok"
+
+    def test_validate_returns_an_ontology_report(self, runner, graph_cfg):
+        """#1814: validate_ontology() takes an ontology, not `shapes_file`."""
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "ontology", "validate", "--json"]
+        )
+        _ok(result)
+        data = _json_output(result)
+        assert {"valid", "consistent", "satisfiable"} <= set(data)
+
+    def test_shacl_generates_shapes_from_the_ontology(self, runner, graph_cfg):
+        """#1814: SHACLGenerator.generate() requires the ontology argument."""
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "ontology", "shacl", "--json"]
+        )
+        _ok(result)
+        assert "shacl" in _json_output(result)
+
+    def test_version_reports_no_snapshots_yet(self, runner, graph_cfg):
+        """#1814: OntologyVersionManager has no `current`; list_versions() does."""
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "ontology", "version", "--json"]
+        )
+        _ok(result)
+        assert _json_output(result)["version"] is None
+
+    def test_version_reports_the_newest_snapshot(self, runner, graph_cfg, monkeypatch):
+        """With snapshots on record the command reports the most recent one."""
+        import semantica.change_management as change_module
+
+        class _Manager:
+            def __init__(self, **kwargs):
+                pass
+
+            def list_versions(self):
+                return [
+                    {"label": "v1", "timestamp": "2026-01-01T00:00:00"},
+                    {"label": "v2", "timestamp": "2026-02-01T00:00:00"},
+                ]
+
+        monkeypatch.setattr(change_module, "OntologyVersionManager", _Manager)
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "ontology", "version", "--json"]
+        )
+        _ok(result)
+        assert _json_output(result)["label"] == "v2"
+
+    def test_health_returns_a_quality_report(self, runner, graph_cfg):
+        """#1814: OntologyValidator has no `health`; the quality gate does."""
+        result = runner.invoke(
+            cli_module.main, ["--config", graph_cfg, "ontology", "health", "--json"]
+        )
+        _ok(result)
+        assert "passed" in _json_output(result)
 
 
 # ─── export ───────────────────────────────────────────────────────────────────
