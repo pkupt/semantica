@@ -145,6 +145,30 @@ def _extract_first_json_value(text: str):
     return None
 
 
+class ResponseText(str):
+    """A ``str`` that also carries the provider response's usage and cost.
+
+    ``generate()`` must keep returning the generated text, but the provenance
+    wrappers in ``semantica.llms`` also need the token counts and cost that only
+    the raw provider response holds. Attaching that metadata to the returned
+    value keeps it scoped to the request it came from, rather than stashing it
+    on the provider instance where concurrent calls would overwrite each other.
+    """
+
+    def __new__(
+        cls,
+        text: str,
+        usage: Any = None,
+        cost: Optional[float] = None,
+        hidden_params: Optional[Dict[str, Any]] = None,
+    ) -> "ResponseText":
+        instance = super().__new__(cls, text if text is not None else "")
+        instance.usage = usage
+        instance.cost = cost
+        instance._hidden_params = hidden_params or {}
+        return instance
+
+
 class BaseProvider:
     """Base class for providers - makes it easy to add custom providers."""
 
@@ -802,7 +826,11 @@ class OpenAIProvider(BaseProvider):
         )
 
         response = self.client.chat.completions.create(**create_kwargs)
-        return response.choices[0].message.content
+        return ResponseText(
+            response.choices[0].message.content,
+            usage=getattr(response, "usage", None),
+            cost=getattr(response, "cost", None),
+        )
 
     def generate_structured(self, prompt: str, **kwargs) -> Union[dict, list]:
         """Generate structured JSON output."""
@@ -1083,7 +1111,11 @@ class GroqProvider(BaseProvider):
         )
 
         response = self.client.chat.completions.create(**create_kwargs)
-        return response.choices[0].message.content
+        return ResponseText(
+            response.choices[0].message.content,
+            usage=getattr(response, "usage", None),
+            cost=getattr(response, "cost", None),
+        )
 
     def generate_structured(self, prompt: str, **kwargs) -> Union[dict, list]:
         """Generate structured output."""

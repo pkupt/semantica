@@ -138,6 +138,47 @@ class LLMProvenanceMixin:
                 }
             )
 
+    def _track_generation(
+        self,
+        kind: str,
+        call_id_prefix: str,
+        prompt: str,
+        invoke,
+        **metadata,
+    ):
+        """Run one generation call and record a provenance entry for it.
+
+        Args:
+            kind: Generation mode label (e.g. ``"structured"``, ``"typed"``),
+                recorded as ``generation_mode``.
+            call_id_prefix: Prefix for the generated call id.
+            prompt: Input prompt.
+            invoke: Zero-argument callable performing the wrapped LLM call.
+            **metadata: Extra metadata recorded with the entry.
+
+        Returns:
+            Whatever ``invoke`` returns, unchanged.
+        """
+        start_time = time.time()
+        activity_started_at_time = datetime.utcnow().isoformat()
+        result = invoke()
+        elapsed = time.time() - start_time
+        activity_ended_at_time = datetime.utcnow().isoformat()
+
+        if self.provenance:
+            self._track_llm_call(
+                call_id=f"{call_id_prefix}_{uuid.uuid4().hex[:8]}",
+                prompt=prompt,
+                response=result,
+                generation_mode=kind,
+                latency_seconds=elapsed,
+                activity_started_at_time=activity_started_at_time,
+                activity_ended_at_time=activity_ended_at_time,
+                **metadata,
+            )
+
+        return result
+
 
 class GroqLLMWithProvenance(LLMProvenanceMixin):
     """
@@ -225,6 +266,27 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
 
         return response
 
+    def generate_structured(self, prompt: str, **kwargs):
+        """Generate structured JSON with provenance tracking."""
+        return self._track_generation(
+            "structured",
+            "groq_structured",
+            prompt,
+            lambda: self._llm.generate_structured(prompt, **kwargs),
+        )
+
+    def generate_typed(self, prompt: str, schema, max_retries: int = 3, **kwargs):
+        """Generate schema-validated output with provenance tracking."""
+        return self._track_generation(
+            "typed",
+            "groq_typed",
+            prompt,
+            lambda: self._llm.generate_typed(
+                prompt, schema, max_retries=max_retries, **kwargs
+            ),
+            max_retries=max_retries,
+        )
+
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
         return getattr(self._llm, name)
@@ -310,6 +372,27 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
 
         return response
 
+    def generate_structured(self, prompt: str, **kwargs):
+        """Generate structured JSON with provenance tracking."""
+        return self._track_generation(
+            "structured",
+            "openai_structured",
+            prompt,
+            lambda: self._llm.generate_structured(prompt, **kwargs),
+        )
+
+    def generate_typed(self, prompt: str, schema, max_retries: int = 3, **kwargs):
+        """Generate schema-validated output with provenance tracking."""
+        return self._track_generation(
+            "typed",
+            "openai_typed",
+            prompt,
+            lambda: self._llm.generate_typed(
+                prompt, schema, max_retries=max_retries, **kwargs
+            ),
+            max_retries=max_retries,
+        )
+
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
         return getattr(self._llm, name)
@@ -374,6 +457,27 @@ class HuggingFaceLLMWithProvenance(LLMProvenanceMixin):
             )
 
         return response
+
+    def generate_structured(self, prompt: str, **kwargs):
+        """Generate structured JSON with provenance tracking."""
+        return self._track_generation(
+            "structured",
+            "hf_structured",
+            prompt,
+            lambda: self._llm.generate_structured(prompt, **kwargs),
+        )
+
+    def generate_typed(self, prompt: str, schema, max_retries: int = 3, **kwargs):
+        """Generate schema-validated output with provenance tracking."""
+        return self._track_generation(
+            "typed",
+            "hf_typed",
+            prompt,
+            lambda: self._llm.generate_typed(
+                prompt, schema, max_retries=max_retries, **kwargs
+            ),
+            max_retries=max_retries,
+        )
 
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
@@ -456,6 +560,27 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
             )
 
         return response
+
+    def generate_structured(self, prompt: str, **kwargs):
+        """Generate structured JSON with provenance tracking."""
+        return self._track_generation(
+            "structured",
+            "lite_structured",
+            prompt,
+            lambda: self._llm.generate_structured(prompt, **kwargs),
+        )
+
+    def generate_typed(self, prompt: str, schema, max_retries: int = 3, **kwargs):
+        """Generate schema-validated output with provenance tracking."""
+        return self._track_generation(
+            "typed",
+            "lite_typed",
+            prompt,
+            lambda: self._llm.generate_typed(
+                prompt, schema, max_retries=max_retries, **kwargs
+            ),
+            max_retries=max_retries,
+        )
 
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from ..utils.exceptions import ProcessingError
 from ..utils.logging import get_logger
+from ..semantic_extract.providers import ResponseText
 
 logger = get_logger("llms.litellm")
 
@@ -168,16 +169,28 @@ class LiteLLM:
                 **options
             )
             
+            # Metadata the provenance wrappers read back off the returned value.
+            hidden_params = getattr(response, '_hidden_params', None) or {}
+            usage = getattr(response, 'usage', None)
+            if usage is None and isinstance(response, dict):
+                usage = response.get('usage')
+            meta = {
+                "usage": usage,
+                "cost": hidden_params.get('response_cost'),
+                "hidden_params": hidden_params,
+            }
+
             # Extract text from response
             if hasattr(response, 'choices') and len(response.choices) > 0:
-                return response.choices[0].message.content
+                return ResponseText(response.choices[0].message.content, **meta)
             elif isinstance(response, dict):
                 if 'choices' in response and len(response['choices']) > 0:
-                    return response['choices'][0]['message']['content']
+                    choice = response['choices'][0]
+                    return ResponseText(choice['message']['content'], **meta)
                 elif 'content' in response:
-                    return response['content']
+                    return ResponseText(response['content'], **meta)
             elif isinstance(response, str):
-                return response
+                return ResponseText(response, **meta)
             
             raise ProcessingError(f"Unexpected response format from LiteLLM: {type(response)}")
             
