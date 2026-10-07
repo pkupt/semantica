@@ -156,8 +156,16 @@ class TestKGAlgorithmIntegration:
         # Mock KG algorithms
         mock_path_finder.return_value.find_shortest_path.return_value = ["entity1", "entity2", "entity3"]
         mock_community.return_value.detect_communities.return_value = {
-            0: ["customer_123", "related_entity1", "related_entity2"],
-            1: ["other_entity"]
+            "communities": [
+                ["customer_123", "related_entity1", "related_entity2"],
+                ["other_entity"],
+            ],
+            "node_assignments": {
+                "customer_123": 0, "related_entity1": 0, "related_entity2": 0,
+                "other_entity": 1,
+            },
+            "modularity": 0.5,
+            "algorithm": "louvain",
         }
         mock_centrality.return_value.calculate_degree_centrality.return_value = 0.8
         
