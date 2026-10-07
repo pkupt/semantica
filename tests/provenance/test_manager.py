@@ -1865,3 +1865,72 @@ class TestMixedFormatTimestampComparisons:
         prov_mgr = self._manager_with("not-a-timestamp", "2026-08-19T12:00:00+00:00")
         entries = prov_mgr.audit_log(since="2026-08-19T11:00:00", format="json")
         assert [e["entity_id"] for e in entries] == ["entity_1"]
+
+
+class TestProvenanceStorageEnvResolution:
+    """#1810: the manager honours the provenance DB env vars the Explorer uses.
+
+    The CLI constructs ``ProvenanceManager(config=...)`` with no storage path
+    and used to fall back to an empty in-memory store, so ``provenance audit``
+    never saw the chain the Explorer had written.
+    """
+
+    ENV_VARS = ("SEMANTICA_PROVENANCE_DB", "EXPLORER_PROVENANCE_DB")
+
+    @pytest.fixture(autouse=True)
+    def _isolate_env_and_default(self, monkeypatch):
+        for name in self.ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+        original = ProvenanceManager._default_storage_path
+        ProvenanceManager._default_storage_path = None
+        try:
+            yield
+        finally:
+            ProvenanceManager._default_storage_path = original
+
+    def test_env_var_is_used_when_nothing_else_is_configured(
+        self, tmp_path, monkeypatch
+    ):
+        db = tmp_path / "from_env.db"
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(db))
+        pm = ProvenanceManager()
+        assert isinstance(pm.storage, SQLiteStorage)
+        assert pm.storage.db_path == str(db)
+
+    def test_explorer_env_var_is_the_fallback(self, tmp_path, monkeypatch):
+        db = tmp_path / "from_explorer_env.db"
+        monkeypatch.setenv("EXPLORER_PROVENANCE_DB", str(db))
+        pm = ProvenanceManager()
+        assert isinstance(pm.storage, SQLiteStorage)
+        assert pm.storage.db_path == str(db)
+
+    def test_semantica_env_var_wins_over_the_explorer_one(self, tmp_path, monkeypatch):
+        primary = tmp_path / "primary.db"
+        secondary = tmp_path / "secondary.db"
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(primary))
+        monkeypatch.setenv("EXPLORER_PROVENANCE_DB", str(secondary))
+        pm = ProvenanceManager()
+        assert pm.storage.db_path == str(primary)
+
+    def test_explicit_storage_path_beats_the_env_var(self, tmp_path, monkeypatch):
+        explicit = tmp_path / "explicit.db"
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(tmp_path / "from_env.db"))
+        pm = ProvenanceManager(storage_path=str(explicit))
+        assert pm.storage.db_path == str(explicit)
+
+    def test_config_storage_path_beats_the_env_var(self, tmp_path, monkeypatch):
+        cfg_path = tmp_path / "from_config.db"
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(tmp_path / "from_env.db"))
+        pm = ProvenanceManager(config={"provenance": {"storage_path": str(cfg_path)}})
+        assert pm.storage.db_path == str(cfg_path)
+
+    def test_default_storage_path_beats_the_env_var(self, tmp_path, monkeypatch):
+        default = tmp_path / "default.db"
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(tmp_path / "from_env.db"))
+        ProvenanceManager._default_storage_path = str(default)
+        pm = ProvenanceManager()
+        assert pm.storage.db_path == str(default)
+
+    def test_without_any_configuration_storage_is_in_memory(self):
+        pm = ProvenanceManager()
+        assert isinstance(pm.storage, InMemoryStorage)
