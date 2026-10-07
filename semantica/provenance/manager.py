@@ -31,6 +31,7 @@ from contextlib import contextmanager
 import copy
 import inspect
 import json
+import os
 import threading
 
 from .schemas import ProvenanceEntry, SourceReference, AgentRecord, ActivityRecord
@@ -110,6 +111,22 @@ class ProvenanceManager:
             )
             cls._lock.release()
     
+    @staticmethod
+    def _storage_path_from_env() -> Optional[str]:
+        """Resolve a persisted provenance DB path from the environment.
+
+        The Explorer reads ``SEMANTICA_PROVENANCE_DB`` and falls back to
+        ``EXPLORER_PROVENANCE_DB`` (semantica/explorer/app.py); the manager
+        honours the same pair so the CLI and the Explorer agree on one
+        database instead of the CLI silently using an empty in-memory store
+        (#1810).
+        """
+        for name in ("SEMANTICA_PROVENANCE_DB", "EXPLORER_PROVENANCE_DB"):
+            value = os.environ.get(name)
+            if value:
+                return value
+        return None
+
     def __init__(
         self,
         storage: Optional[ProvenanceStorage] = None,
@@ -145,6 +162,9 @@ class ProvenanceManager:
         if not storage_path:
             with self._lock:
                 storage_path = self._default_storage_path
+
+        if not storage_path:
+            storage_path = self._storage_path_from_env()
 
         if storage_path:
             self.storage = SQLiteStorage(storage_path)
