@@ -947,10 +947,20 @@ def doctor(cli_ctx: CLIContext, local_json: bool, deep_embeddings: bool) -> None
 
         # Vector store
         def _vector() -> str:
-            cfg = cli_ctx.config.to_dict()
-            backend = cli_ctx.vector_store_backend or cfg.get("vector_store", {}).get("backend", "faiss")
+            backend = _resolve_vector_backend(cli_ctx)
             if backend == "faiss":
                 import faiss  # noqa: F401
+            elif backend == "sqlite":
+                # Served by the sqlite-vec extension; check availability the
+                # same way the store does (find_spec) instead of importing it.
+                from .vector_store.sqlite_vec_store import SQLITE_VEC_AVAILABLE
+
+                if not SQLITE_VEC_AVAILABLE:
+                    raise ImportError(
+                        "sqlite-vec is not installed. Install it with: "
+                        "pip install semantica[vectorstore-sqlite]"
+                    )
+                return "sqlite-vec importable"
             return f"{backend} importable"
         checks.append(_check("Vector store", _vector, hint="pip install semantica[vectorstore-…]"))
 
@@ -1265,6 +1275,9 @@ _LOCK_TIMEOUT_SECONDS = 10.0
 # `semantica init` offers memory as its default and ContextGraph serves it
 # without any server, so it is also the fallback when nothing is configured.
 _DEFAULT_GRAPH_BACKEND = MEMORY_GRAPH_BACKEND
+# VectorStore's own default (see vector_store.py); kept here so ``doctor``
+# reports the same backend the CLI would build when nothing is configured.
+_DEFAULT_VECTOR_BACKEND = "faiss"
 
 
 def _resolve_graph_backend(cli_ctx: CLIContext) -> str:
@@ -1278,6 +1291,24 @@ def _resolve_graph_backend(cli_ctx: CLIContext) -> str:
     return cli_ctx.store_backend or graph_db.get(
         "backend", _DEFAULT_GRAPH_BACKEND
     )
+
+
+def _resolve_vector_backend(cli_ctx: CLIContext) -> str:
+    """Return the vector backend this invocation will actually use.
+
+    Resolution order matches the MCP runtime
+    (``semantica_mcp/mcp/session.py::get_vector_store``): the ``--vector-store``
+    flag, then the config file, then ``SEMANTICA_VECTOR_BACKEND``, then the
+    VectorStore default. ``doctor`` used to stop at the config file, so a
+    working sqlite-vec MCP deployment was reported as a faiss failure (#1818).
+    """
+    configured = cli_ctx.vector_store_backend or cli_ctx.config.to_dict().get(
+        "vector_store", {}
+    ).get("backend")
+    if configured:
+        return configured
+    from_env = os.environ.get("SEMANTICA_VECTOR_BACKEND", "").strip().lower()
+    return from_env or _DEFAULT_VECTOR_BACKEND
 
 
 def _uses_memory_graph(cli_ctx: CLIContext) -> bool:
@@ -1296,11 +1327,16 @@ def _memory_graph_path(cli_ctx: CLIContext) -> Path:
     The CLI is one process per command, so an in-memory graph that is never
     written back would make ``decision record`` pointless. Defaults to
     ``~/.semantica/context_graph.json`` (beside ``config.yaml``); override with
-    ``graph_db.path`` in the config.
+    ``graph_db.path`` in the config, or — when no config path is set — with
+    ``SEMANTICA_KG_PATH``, the file the MCP runtime loads its graph from, so
+    ``doctor`` reports the configuration actually in effect (#1818).
     """
     configured = cli_ctx.config.to_dict().get("graph_db", {}).get("path")
     if configured:
         return Path(configured).expanduser()
+    from_env = os.environ.get("SEMANTICA_KG_PATH", "").strip()
+    if from_env:
+        return Path(from_env).expanduser()
     return Path.home() / ".semantica" / "context_graph.json"
 
 
