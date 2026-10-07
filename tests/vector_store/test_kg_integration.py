@@ -288,8 +288,16 @@ class TestKGAlgorithmSpecificFeatures:
         # Mock community detector
         with patch.object(pipeline.community_detector, 'detect_communities') as mock_community:
             mock_community.return_value = {
-                0: ["entity1", "entity2", "entity3"],
-                1: ["entity4", "entity5"]
+                "communities": [
+                    ["entity1", "entity2", "entity3"],
+                    ["entity4", "entity5"],
+                ],
+                "node_assignments": {
+                    "entity1": 0, "entity2": 0, "entity3": 0,
+                    "entity4": 1, "entity5": 1,
+                },
+                "modularity": 0.5,
+                "algorithm": "louvain",
             }
             
             # Test community detection
