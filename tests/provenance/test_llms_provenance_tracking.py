@@ -11,6 +11,8 @@ usage/cost:
 
 These tests drive the wrappers with a stub LLM and a recording provenance
 manager so they stay offline and assert on the recorded metadata directly.
+A second group drives the providers themselves with a canned client, so a
+provider that stops carrying usage/cost turns the suite red.
 """
 
 from types import SimpleNamespace
@@ -18,7 +20,11 @@ from types import SimpleNamespace
 import pytest
 
 from semantica.llms.llms_provenance import GroqLLMWithProvenance
-from semantica.semantic_extract.providers import ResponseText
+from semantica.semantic_extract.providers import (
+    GroqProvider,
+    OpenAIProvider,
+    ResponseText,
+)
 
 
 class _RecordingProvenanceManager:
@@ -182,3 +188,93 @@ def test_all_wrappers_expose_structured_and_typed(wrapper_name):
     wrapper_cls = getattr(module, wrapper_name)
     assert "generate_structured" in wrapper_cls.__dict__
     assert "generate_typed" in wrapper_cls.__dict__
+
+
+class _FakeCompletions:
+    """Only the ``chat.completions.create`` surface the providers use."""
+
+    def __init__(self, response):
+        self._response = response
+
+    def create(self, **kwargs):
+        return self._response
+
+
+class _FakeChat:
+    def __init__(self, response):
+        self.completions = _FakeCompletions(response)
+
+
+class _FakeClient:
+    """Stand-in for an OpenAI/Groq client, backed by a canned response."""
+
+    def __init__(self, response):
+        self.chat = _FakeChat(response)
+
+
+def _chat_response(content, cost=None):
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+    if cost is not None:
+        response.cost = cost
+    return response
+
+
+class TestProvidersCarryUsageAndCost:
+    """The fix lives in the providers, so drive them rather than a stub."""
+
+    def test_openai_provider_returns_response_text(self):
+        provider = OpenAIProvider(api_key="test-key")
+        provider.client = _FakeClient(_chat_response("hello", cost=0.002))
+
+        result = provider.generate("question")
+
+        assert isinstance(result, ResponseText)
+        assert result == "hello"
+        assert result.usage is not None
+        assert result.usage.prompt_tokens == 10
+        assert result.cost == 0.002
+
+    def test_groq_provider_returns_response_text(self):
+        provider = GroqProvider(api_key="test-key")
+        provider.client = _FakeClient(_chat_response("hi"))
+
+        result = provider.generate("question")
+
+        assert isinstance(result, ResponseText)
+        assert result == "hi"
+        assert result.usage is not None
+
+    def test_wrapper_records_usage_from_real_provider(self):
+        provider = GroqProvider(api_key="test-key")
+        provider.client = _FakeClient(_chat_response("hello"))
+        wrapper, recorder = _wrapper_with(provider)
+
+        result = wrapper.generate("question")
+
+        assert result == "hello"
+        metadata = recorder.calls[0]["metadata"]
+        assert metadata["prompt_tokens"] == 10
+        assert metadata["completion_tokens"] == 5
+        assert metadata["total_tokens"] == 15
+
+    def test_litellm_returns_response_text_with_cost(self, monkeypatch):
+        import semantica.llms.litellm as litellm_module
+
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))],
+            usage=SimpleNamespace(prompt_tokens=3, completion_tokens=4),
+            _hidden_params={"response_cost": 0.007},
+        )
+        monkeypatch.setattr(litellm_module, "LITELLM_AVAILABLE", True)
+        monkeypatch.setattr(litellm_module, "completion", lambda **kwargs: response)
+
+        llm = litellm_module.LiteLLM(model="openai/gpt-4o")
+        result = llm.generate("question")
+
+        assert isinstance(result, ResponseText)
+        assert result == "answer"
+        assert result.usage is not None
+        assert result.cost == 0.007
