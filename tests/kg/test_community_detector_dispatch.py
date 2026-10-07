@@ -13,10 +13,13 @@ node ids straight off ``graph.nodes``, found none, and the dispatched calls came
 back with ``No nodes found matching the specified criteria``.
 """
 
+import logging
+
 import networkx as nx
 import pytest
 
 from semantica.context.context_graph import ContextGraph
+from semantica.kg import _graph_view, community_detector
 from semantica.kg.community_detector import CommunityDetector
 
 
@@ -128,6 +131,58 @@ def test_unknown_algorithm_still_raises():
         CommunityDetector().detect_communities(_graph_dict(), algorithm="nope")
 
 
+@pytest.mark.parametrize("method", [["louvain"], {"k": 1}, 0, False, b"louvain"])
+def test_non_string_method_is_rejected(method):
+    # A non-string alias used to be ignored, or to raise "unhashable type"
+    # from the handler lookup. It now gets one clear error naming its type.
+    with pytest.raises(TypeError, match="method must be a string or None, got"):
+        CommunityDetector().detect_communities(_graph_dict(), method=method)
+
+
+@pytest.mark.parametrize("algorithm", [["louvain"], None, 0])
+def test_non_string_algorithm_is_rejected(algorithm):
+    with pytest.raises(TypeError, match="algorithm must be a string, got"):
+        CommunityDetector().detect_communities(_graph_dict(), algorithm=algorithm)
+
+
+def test_label_propagation_ignores_louvain_options_with_a_warning(caplog):
+    # Louvain, Leiden and overlapping accept options they do not use. Label
+    # propagation now does the same instead of raising "unexpected keyword
+    # argument", but says which options it ignored.
+    with caplog.at_level(logging.WARNING, logger="semantica.community_detector"):
+        result = CommunityDetector().detect_communities(
+            _graph_dict(),
+            method="label_propagation",
+            resolution=1.0,
+            max_iter=5,
+            random_seed=7,
+        )
+
+    assert result["algorithm"] == "label_propagation"
+    assert sorted(sorted(c) for c in result["communities"]) == [
+        ["a", "b", "c"],
+        ["d", "e", "f"],
+    ]
+    assert any(
+        "ignores unsupported options: max_iter, resolution" in record.message
+        for record in caplog.records
+    )
+
+
+def test_label_propagation_options_raise_no_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="semantica.community_detector"):
+        CommunityDetector().detect_communities(
+            _graph_dict(),
+            method="label_propagation",
+            max_iterations=50,
+            random_seed=7,
+        )
+
+    assert not any(
+        "ignores unsupported options" in record.message for record in caplog.records
+    )
+
+
 def test_unknown_method_keeps_the_algorithm_argument():
     # An unrecognised alias is ignored instead of being rewritten to Louvain.
     result = CommunityDetector().detect_communities(
@@ -198,6 +253,68 @@ def test_graph_dict_honours_the_filter_when_its_edges_declare_types():
         ["a", "b"],
         ["c", "d"],
     ]
+
+
+def test_graph_dict_keeps_an_untyped_edge_beside_typed_ones():
+    # Whether an edge is classifiable is decided per edge. One typed record
+    # must not turn every untyped edge in the same graph into a dropped link.
+    graph = {
+        "nodes": ["a", "b", "c", "d", "e"],
+        "edges": [
+            {"source": "a", "target": "b", "type": "knows"},
+            {"source": "b", "target": "c", "type": "works_at"},
+            {"source": "c", "target": "d"},
+            {"source": "d", "target": "e"},
+            {"source": "e", "target": "c"},
+        ],
+    }
+
+    result = CommunityDetector().detect_communities(
+        graph,
+        method="label_propagation",
+        relationship_types=["knows"],
+        random_seed=7,
+    )
+
+    assert sorted(sorted(c) for c in result["communities"]) == [
+        ["a", "b"],
+        ["c", "d", "e"],
+    ]
+
+
+def test_graph_dict_filter_reads_the_edge_types_once(monkeypatch):
+    # The relationship filter used to rescan every edge record for every
+    # neighbour it classified, which made filtering O(E^2). The number of
+    # scans must not grow with the graph.
+    calls = []
+    real = _graph_view._extract_edges
+
+    def counting(graph):
+        calls.append(graph)
+        return real(graph)
+
+    monkeypatch.setattr(_graph_view, "_extract_edges", counting)
+
+    scans = []
+    for n in (10, 40):
+        nodes = ["n%d" % i for i in range(n)]
+        graph = {
+            "nodes": nodes,
+            "edges": [
+                {"source": a, "target": b, "type": "next"}
+                for a, b in zip(nodes, nodes[1:])
+            ],
+        }
+        calls.clear()
+        CommunityDetector().detect_communities(
+            graph,
+            method="label_propagation",
+            relationship_types=["next"],
+            random_seed=7,
+        )
+        scans.append(len(calls))
+
+    assert scans[0] == scans[1]
 
 
 def test_graph_dict_labels_filter_the_nodes():
@@ -307,8 +424,53 @@ def test_chunked_label_propagation_keeps_the_edges_between_chunks():
         graph, method="label_propagation", chunk_size=3, random_seed=7
     )
 
+    # Louvain also returns one community here and ignores chunk_size, so
+    # without this the test would pass even if the call never reached label
+    # propagation.
+    assert chunked["algorithm"] == "label_propagation"
     assert _partition(whole) == [[0, 1, 2, 3, 4, 5]]
     assert _partition(chunked) == _partition(whole)
+
+
+def test_chunked_label_propagation_builds_the_adjacency_once(monkeypatch):
+    # The chunks only split the label updates. Rebuilding the whole graph's
+    # adjacency and edge-type index for every chunk cost O(N / chunk_size)
+    # passes over the graph and produced the same rows.
+    adjacency_calls = []
+    index_calls = []
+    real_adjacency = community_detector.build_adjacency
+    real_index = community_detector.build_edge_type_index
+
+    def counting_adjacency(graph, directed=False):
+        adjacency_calls.append(graph)
+        return real_adjacency(graph, directed=directed)
+
+    def counting_index(graph):
+        index_calls.append(graph)
+        return real_index(graph)
+
+    monkeypatch.setattr(community_detector, "build_adjacency", counting_adjacency)
+    monkeypatch.setattr(community_detector, "build_edge_type_index", counting_index)
+
+    nodes = ["n%d" % i for i in range(6)]
+    graph = {
+        "nodes": nodes,
+        "edges": [
+            {"source": a, "target": b, "type": "next"}
+            for a, b in zip(nodes, nodes[1:])
+        ],
+    }
+
+    CommunityDetector().detect_communities(
+        graph,
+        method="label_propagation",
+        relationship_types=["next"],
+        chunk_size=2,
+        random_seed=7,
+    )
+
+    assert len(adjacency_calls) == 1
+    assert len(index_calls) == 1
 
 
 def test_chunked_adjacency_keeps_a_neighbour_from_another_chunk():
