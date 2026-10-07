@@ -165,8 +165,9 @@ jobs:
       # marker is strict here because `CI` is set; outside CI the hook makes it
       # non-strict, since the list is measured against this pinned tree and not
       # against a developer's.) The loop below deselects only the entries the
-      # hook must not touch, the ones carrying a marker. The file is the record
-      # of the gap: fixing a defect means deleting its line. It is LF-only — the
+      # hook must not touch: the `# windows-only` ones, and only on Windows. The
+      # file is the record of the gap: fixing a defect means deleting its line.
+      # It is LF-only — the
       # loop feeds each line to --deselect verbatim, so a stray CR would make
       # every node id miss.
       - name: Run the full test suite

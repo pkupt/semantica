@@ -1,12 +1,12 @@
 # Tests that already fail on an unmodified tree.
 #
-# `tests/conftest.py` reads this file and marks every id below
-# `xfail(strict=True)`, so the tests keep running instead of being deselected:
-# an entry that starts passing reports XPASS and, the marker being strict, fails
-# the run. That is what forces its line out of the file, so the list cannot
-# quietly rot. Nothing here is caused by wiring the suite into CI, and none of
-# it is fixed here on purpose: the list reports the gap, it does not paper over
-# it.
+# `tests/conftest.py` reads this file and marks every id below `xfail`, so the
+# tests keep running instead of being deselected. The marker is strict in CI and
+# non-strict outside it, and never strict for a `# non-strict` entry: an entry
+# that starts passing reports XPASS, which fails the run in CI and is only a note
+# locally. In CI that is what forces its line out of the file, so the list cannot
+# quietly rot. Nothing here is caused by wiring the suite into CI, and none of it
+# is fixed here on purpose: the list reports the gap, it does not paper over it.
 #
 # Two markers change how an entry is treated, and both the step and the hook
 # read them so the two agree:
