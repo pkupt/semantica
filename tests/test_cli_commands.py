@@ -490,15 +490,11 @@ class TestIngest:
         assert "output" not in captured["kwargs"]
 
     def test_import_error_is_clean(self, runner, monkeypatch):
-        monkeypatch.setattr(cli_module, "__import__", _import_side_effect, raising=False)
-        original_import = __import__
-        with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
-            (_ for _ in ()).throw(ImportError(n))
-            if n.startswith("semantica.ingest") else original_import(n, *a, **k)
-        )):
-            result = runner.invoke(cli_module.main, ["ingest", "data.pdf"])
+        monkeypatch.setitem(sys.modules, "semantica.ingest", None)
+        result = runner.invoke(cli_module.main, ["ingest", "data.pdf"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+        assert "semantica.ingest" in result.output
 
     def test_type_choice_validation(self, runner):
         result = runner.invoke(cli_module.main, ["ingest", "x.pdf", "--type", "invalid_type"])
@@ -2271,14 +2267,13 @@ class TestTemporal:
                                       "--interval1", "int1", "--interval2", "int2"])
         assert result.exit_code != 0 or result.exit_code == 0  # depends on import
 
-    def test_history_import_error_is_clean(self, runner):
-        with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
-            (_ for _ in ()).throw(ImportError(n))
-            if n.startswith("semantica.kg") else _real_import(n, *a, **k)
-        )):
-            result = runner.invoke(cli_module.main, ["temporal", "history", "entity_alice"])
+    def test_history_import_error_is_clean(self, runner, monkeypatch):
+        monkeypatch.setitem(sys.modules, "semantica.kg", None)
+        result = runner.invoke(cli_module.main, ["temporal", "history",
+                                      "entity_alice"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+        assert "semantica.kg" in result.output
 
 
 # ─── provenance ───────────────────────────────────────────────────────────────
@@ -2768,14 +2763,12 @@ class TestValidate:
         assert data["conforms"] is False
         assert data["violation_count"] >= 1
 
-    def test_integrity_exits_0_with_import_error(self, runner):
-        with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
-            (_ for _ in ()).throw(ImportError(n))
-            if n.startswith("semantica.kg") else _real_import(n, *a, **k)
-        )):
-            result = runner.invoke(cli_module.main, ["validate", "integrity"])
+    def test_integrity_exits_0_with_import_error(self, runner, monkeypatch):
+        monkeypatch.setitem(sys.modules, "semantica.kg", None)
+        result = runner.invoke(cli_module.main, ["validate", "integrity"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+        assert "semantica.kg" in result.output
 
     def test_strictness_choices(self, runner):
         result = runner.invoke(cli_module.main, ["validate", "shacl", "--help"])
@@ -3200,17 +3193,14 @@ class TestExport:
         result = runner.invoke(cli_module.main, ["export", "--format", "magic"])
         assert result.exit_code != 0
 
-    def test_import_error_is_clean(self, runner):
-        original_import = __import__
-        with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
-            (_ for _ in ()).throw(ImportError(n))
-            if "semantica.export" in n else original_import(n, *a, **k)
-        )):
-            result = runner.invoke(
-                cli_module.main, ["--store", "neo4j", "export", "--format", "json"]
-            )
+    def test_import_error_is_clean(self, runner, monkeypatch):
+        monkeypatch.setitem(sys.modules, "semantica.export", None)
+        result = runner.invoke(
+            cli_module.main, ["--store", "neo4j", "export", "--format", "json"]
+        )
         assert result.exit_code != 0
         assert "Traceback" not in result.output
+        assert "semantica.export" in result.output
 
 
 class TestExportMultiFileFormats:
