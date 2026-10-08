@@ -3027,14 +3027,76 @@ class TestStore:
         assert "confirm" in result.output.lower() or result.exit_code == 2
 
     def test_flush_with_confirm(self, runner, monkeypatch):
-        fake_vs = _fake_module(delete_vectors=lambda **kw: None)
+        # store flush used to call delete_vectors(namespace=..., config=...),
+        # but delete_vectors takes vector IDs, so every call raised a
+        # TypeError (#1943). Clearing a namespace means emptying its vectors
+        # and its ID mapping while keeping the namespace itself, so the fake
+        # has to serve manage_namespace() as well as delete_vectors().
+        calls = {}
+
+        def _manage(ns: str, operation: str, **kw: Any) -> Any:
+            calls.setdefault("ops", []).append((ns, operation, kw))
+            if operation == "get_vectors":
+                return ["v1", "v2"]
+            return True
+
+        def _delete(vector_ids: Any, **kw: Any) -> bool:
+            calls["deleted"] = list(vector_ids)
+            return True
+
+        fake_vs = _fake_module(delete_vectors=_delete, manage_namespace=_manage)
         monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
         result = runner.invoke(cli_module.main, ["store", "flush", "--confirm"])
         _ok(result)
+        assert calls["deleted"] == ["v1", "v2"]
+        assert ("default", "remove_vector", {"vector_id": "v1"}) in calls["ops"]
+        assert ("default", "remove_vector", {"vector_id": "v2"}) in calls["ops"]
+
+    def test_flush_empty_namespace_does_not_delete(self, runner, monkeypatch):
+        calls = {}
+
+        def _delete(vector_ids: Any, **kw: Any) -> bool:
+            calls["deleted"] = list(vector_ids)
+            return True
+
+        fake_vs = _fake_module(
+            delete_vectors=_delete,
+            manage_namespace=lambda ns, operation, **kw: [],
+        )
+        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+        result = runner.invoke(
+            cli_module.main, ["store", "flush", "--namespace", "nope", "--confirm"])
+        _ok(result)
+        assert "deleted" not in calls
+        assert "nope" in result.output and "0 vectors" in result.output
 
     def test_stats_requires_backend(self, runner):
         result = runner.invoke(cli_module.main, ["store", "stats"])
         assert result.exit_code != 0
+
+    def test_stats_dispatches_through_graph_store(self, runner, monkeypatch):
+        # store stats used to call run_analytics(backend=..., config=...),
+        # the graph analytics entry point, whose first parameter is an
+        # algorithm name — a TypeError on every invocation (#1943).
+        calls = {}
+
+        class _FakeGraphStore:
+            def __init__(self, backend: Any = None, **cfg: Any) -> None:
+                calls["backend"] = backend
+                calls["cfg"] = cfg
+
+            def get_stats(self) -> Any:
+                calls["stats"] = True
+                return {"node_count": 3, "edge_count": 2}
+
+        import semantica.graph_store as gs_mod
+        monkeypatch.setattr(gs_mod, "GraphStore", _FakeGraphStore)
+        result = runner.invoke(
+            cli_module.main, ["store", "stats", "--backend", "neo4j", "--json"])
+        _ok(result)
+        assert _json_output(result) == {"node_count": 3, "edge_count": 2}
+        assert calls["backend"] == "neo4j"
+        assert calls.get("stats") is True
 
 
 # ─── backup ───────────────────────────────────────────────────────────────────

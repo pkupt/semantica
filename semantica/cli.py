@@ -1458,8 +1458,14 @@ def _memory_decision_records(
     ]
 
 
-def _get_graph_store(cli_ctx: CLIContext) -> Any:
-    """Return a GraphStore instance wired from the current CLIContext config."""
+def _get_graph_store(cli_ctx: CLIContext, backend: Optional[str] = None,
+                     backend_flag: str = "--store") -> Any:
+    """Return a GraphStore instance wired from the current CLIContext config.
+
+    ``backend`` overrides the configured/store backend for callers that take
+    their own ``--backend`` option; ``backend_flag`` names that option so the
+    memory-backend hint points at the flag the caller actually has.
+    """
     from .graph_store import GraphStore
     cfg = cli_ctx.config.to_dict()
     graph_db = dict(cfg.get("graph_db", {}))
@@ -1468,16 +1474,17 @@ def _get_graph_store(cli_ctx: CLIContext) -> Any:
     # so an override left the configured backend in the kwargs and GraphStore
     # received it twice.
     configured = graph_db.pop("backend", None)
-    backend = cli_ctx.store_backend or configured or _DEFAULT_GRAPH_BACKEND
-    if backend == MEMORY_GRAPH_BACKEND:
+    resolved = backend or cli_ctx.store_backend or configured or _DEFAULT_GRAPH_BACKEND
+    if resolved == MEMORY_GRAPH_BACKEND:
         # Reached only if a new caller forgets to route memory through
         # ContextGraph; GraphStore would raise "Unknown backend: memory".
         raise click.ClickException(
             "The 'memory' backend is served by ContextGraph, not GraphStore — "
-            "this command has not been wired for it yet. Use --store neo4j "
-            "(or falkordb/age/neptune) for a real graph database."
+            "this command has not been wired for it yet. Use "
+            f"{backend_flag} neo4j (or falkordb/age/neptune) for a real graph "
+            "database."
         )
-    return GraphStore(backend=backend, **graph_db)
+    return GraphStore(backend=resolved, **graph_db)
 
 
 def _load_policy_rules(path: str) -> Dict[str, Any]:
@@ -4915,15 +4922,21 @@ def store_stats(cli_ctx: CLIContext, backend: str, fmt: str, local_json: bool) -
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
-        try:
-            from .graph_store import run_analytics
-            stats = run_analytics(backend=backend, config=cli_ctx.config.to_dict())
-        except ImportError as exc:
-            raise click.ClickException(f"Graph store module not available: {exc}") from exc
+        # build through _get_graph_store: run_analytics() is the graph
+        # analytics entry point and takes an algorithm name, not a backend,
+        # so passing backend=/config= raised a TypeError on every call (#1943).
+        stats = _get_graph_store(cli_ctx, backend=backend, backend_flag="--backend").get_stats()
         if _is_json(cli_ctx, local_json) or fmt == "json":
             _jecho(stats if isinstance(stats, dict) else {"stats": str(stats)})
         else:
-            console.print(stats)
+            table = Table(title=f"[bold]Backend Statistics[/bold]",
+                          box=_TABLE_BOX, show_edge=False, padding=(0, 1))
+            table.add_column("Metric", style=_KEY, no_wrap=True)
+            table.add_column("Value", style=_VAL)
+            items = stats.items() if isinstance(stats, dict) else []
+            for k, v in items:
+                table.add_row(str(k), str(v))
+            console.print(table)
 
     _run_with_error_handling(_action)
 
@@ -5076,12 +5089,23 @@ def store_flush(cli_ctx: CLIContext, namespace: Optional[str], confirm: bool) ->
     def _action() -> None:
         if not confirm:
             raise click.UsageError("--confirm is required to flush a namespace.")
+        # Clearing a namespace means emptying its vectors while keeping the
+        # namespace itself. manage_namespace() has no "clear" operation, and
+        # delete_vectors() takes vector IDs, not a namespace (#1943); deleting
+        # the namespace object outright is refused for the default namespace,
+        # so resolving the name up front keeps --namespace optional.
+        vs_cfg = cli_ctx.config.to_dict().get("vector_store", {}) or {}
+        target = namespace or vs_cfg.get("default_namespace", "default")
         try:
-            from .vector_store import delete_vectors
-            delete_vectors(namespace=namespace, config=cli_ctx.config.to_dict())
+            from .vector_store import delete_vectors, manage_namespace
+            vector_ids = manage_namespace(target, "get_vectors") or []
+            if vector_ids:
+                delete_vectors(vector_ids)
+                for vector_id in vector_ids:
+                    manage_namespace(target, "remove_vector", vector_id=vector_id)
         except ImportError as exc:
             raise click.ClickException(f"Store module not available: {exc}") from exc
-        _ok(cli_ctx, f"Flushed namespace: {namespace or 'default'}")
+        _ok(cli_ctx, f"Flushed namespace: {target} ({len(vector_ids)} vectors removed)")
 
     _run_with_error_handling(_action)
 
