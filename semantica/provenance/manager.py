@@ -642,21 +642,37 @@ class ProvenanceManager:
         # review). Archive the previous record under a stable versioned key
         # first, exactly as track_entity()/invalidate() do, a pure relabel, so
         # its checksum/sequence_id/previous_checksum stay untouched.
-        with self.storage.transaction() as conn:
-            existing = self.storage._retrieve_with_conn(conn, entry.entity_id)
-            if existing:
-                history_entry = copy.deepcopy(existing)
-                base_history_id = f"{entry.entity_id}:v:{existing.last_updated}"
-                history_id = base_history_id
-                counter = 1
-                while self.storage._retrieve_with_conn(conn, history_id):
-                    history_id = f"{base_history_id}:{counter}"
-                    counter += 1
-                history_entry.entity_id = history_id
-                self.storage._store_with_conn(conn, history_entry)
-                entry.parent_entity_id = history_id
+        try:
+            with self.storage.transaction() as conn:
+                existing = self.storage._retrieve_with_conn(conn, entry.entity_id)
+                if existing:
+                    history_entry = copy.deepcopy(existing)
+                    base_history_id = f"{entry.entity_id}:v:{existing.last_updated}"
+                    history_id = base_history_id
+                    counter = 1
+                    while self.storage._retrieve_with_conn(conn, history_id):
+                        history_id = f"{base_history_id}:{counter}"
+                        counter += 1
+                    history_entry.entity_id = history_id
+                    self.storage._store_with_conn(conn, history_entry)
+                    entry.parent_entity_id = history_id
 
-            return self._save_entry(entry, _conn=conn)
+                return self._save_entry(entry, _conn=conn)
+        except Exception as e:
+            # Same contract as track_entity(): this method documents
+            # "None if storage fails" (#783). Without this guard the
+            # InMemory backend's failure surfaces at transaction *exit*
+            # (storage.transaction() flushes staged rows through store()),
+            # i.e. after _save_entry's own try/except has already returned,
+            # so the error used to escape straight to the caller.
+            self.logger.error(
+                "Failed to track property source '%s' (transaction rolled back): %s. "
+                "Returning None.",
+                entry.entity_id,
+                e,
+                exc_info=True,
+            )
+            return None
     
     # === Batch Operations ===
     

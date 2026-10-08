@@ -709,13 +709,19 @@ class TestProvenanceManager:
             assert entry is None
 
     def test_track_property_source_storage_error_swallowed_sqlite(self, tmp_path):
-        """Test that track_property_source returns None when storage.store() fails
+        """Test that track_property_source returns None when its write fails
         on the SQLite backend, mirroring the InMemory contract verified by
-        test_track_property_source_storage_error_swallowed (#783/#785)."""
+        test_track_property_source_storage_error_swallowed (#783/#785).
+
+        This one injects the failure through ``_store_with_conn`` rather than
+        ``store``: track_property_source writes inside its own transaction, and
+        SQLiteProvenanceStorage._store_with_conn issues the INSERT directly, so
+        ``store`` is never on that path and patching it would exercise nothing.
+        """
         db_path = str(tmp_path / "test_track_property_source_sqlite.db")
         prov_mgr = ProvenanceManager(storage_path=db_path)
         source = SourceReference(document="doc_1", page=1, confidence=0.9)
-        with patch.object(prov_mgr.storage, "store", side_effect=RuntimeError("storage error")):
+        with patch.object(prov_mgr.storage, "_store_with_conn", side_effect=RuntimeError("storage error")):
             entry = prov_mgr.track_property_source(
                 entity_id="e_test",
                 property_name="prop_test",
