@@ -2621,6 +2621,96 @@ class TestValidate:
         )
         assert classes == {"people": "http://shapes.example/v#Person"}
 
+    def test_shacl_data_graph_maps_relationship_types_to_shape_iris(self):
+        # Generated shapes constrain the property IRI, so a relationship whose
+        # raw type inference renamed has to be mapped like an entity attribute
+        # (#1814 review).
+        graph = {
+            "entities": [{"id": "n1", "type": "Person"},
+                         {"id": "n2", "type": "Person"}],
+            "relationships": [{"source": "n1", "target": "n2", "type": "works_with"}],
+        }
+        turtle = cli_module._shacl_data_graph_turtle(
+            graph, "http://ex.org/ont#", {},
+            {"works_with": "http://ex.org/ont#worksWith"},
+        )
+        assert "worksWith" in turtle
+        assert "works_with" not in turtle
+
+    def test_shacl_data_namespaces_resolve_classes_and_paths_separately(self, tmp_path):
+        # Target classes and property paths can live in different vocabularies;
+        # a single namespace for both leaves the classes with no focus node and
+        # pySHACL reports that as conforming (#1814 review).
+        shapes = tmp_path / "mixed.ttl"
+        shapes.write_text(
+            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
+            "@prefix a: <http://ex.org/classes#> .\n"
+            "@prefix b: <http://ex.org/props#> .\n"
+            "a:Person a sh:NodeShape ; sh:targetClass a:Person ;\n"
+            "  sh:property [ sh:path b:name ] .\n",
+            encoding="utf-8",
+        )
+        ontology = {"classes": [], "properties": []}
+        class_ns, property_ns = cli_module._shacl_data_namespaces(ontology, str(shapes))
+        assert class_ns == "http://ex.org/classes#"
+        assert property_ns == "http://ex.org/props#"
+
+    def test_term_iris_cover_every_raw_source_key(self):
+        # Inference merges names that normalize to one property and keeps a
+        # single inferred_from; the other spelling still has to resolve to the
+        # same IRI or its value escapes the shape (#1814 review).
+        ontology = {
+            "classes": [],
+            "properties": [{
+                "name": "fooBar",
+                "uri": "http://ex.org/ont#fooBar",
+                "metadata": {"inferred_from": "fooBar",
+                             "inferred_from_all": ["fooBar", "foo_bar"]},
+            }],
+        }
+        _, properties = cli_module._term_iris_by_source(ontology)
+        assert properties["fooBar"] == "http://ex.org/ont#fooBar"
+        assert properties["foo_bar"] == properties["fooBar"]
+
+    def test_ontology_from_graph_passes_the_occurrence_gate(self, monkeypatch):
+        captured = {}
+
+        class _Gen:
+            def __init__(self, **kwargs):
+                pass
+
+            def generate_ontology(self, data, **options):
+                captured.update(options)
+                return {"classes": [], "properties": []}
+
+        import semantica.ontology as ontology_mod
+        monkeypatch.setattr(ontology_mod, "OntologyGenerator", _Gen)
+        cli_module._ontology_from_graph(
+            MagicMock(), {"entities": [], "relationships": []}, min_occurrences=1
+        )
+        assert captured.get("min_occurrences") == 1
+
+    def test_shacl_data_graph_percent_encodes_iris(self):
+        # The store path uses a node's display name as its ID, so a name with a
+        # space would produce unparseable Turtle (#1814 review).
+        graph = {"entities": [{"id": "Alice Smith", "type": "Person"}],
+                 "relationships": []}
+        turtle = cli_module._shacl_data_graph_turtle(graph, "http://ex.org/ont#")
+        assert "Alice%20Smith" in turtle
+        assert "Alice Smith" not in turtle
+
+    def test_ontology_version_hints_the_key_it_actually_reads(self, runner):
+        result = runner.invoke(cli_module.main, ["ontology", "version"])
+        assert "custom.ontology.version_storage_path" in _flatten(result.output)
+
+    def test_ontology_validate_shapes_points_at_validate_shacl(self, runner):
+        # --shapes moved to `validate shacl`; an existing script should get a
+        # pointer rather than Click's "No such option" (#1814 review).
+        result = runner.invoke(cli_module.main,
+                               ["ontology", "validate", "--shapes", "x.ttl"])
+        assert result.exit_code != 0
+        assert "validate shacl" in _flatten(result.output)
+
     def test_shacl_data_namespace_follows_the_external_shapes_file(self, tmp_path):
         shapes = tmp_path / "shapes.ttl"
         shapes.write_text(
