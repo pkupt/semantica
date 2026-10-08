@@ -18,6 +18,7 @@ import os
 import time
 import re
 import stat
+import sys
 import tarfile
 import types
 from typing import Any
@@ -3792,11 +3793,33 @@ class TestDoctorBackendEnvResolution:
     ):
         import semantica.vector_store.sqlite_vec_store as sqlite_store
 
+        fake = types.ModuleType("sqlite_vec")
+        fake.load = lambda conn: None
         monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
         monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", True)
+        monkeypatch.setitem(sys.modules, "sqlite_vec", fake)
         row = self._checks(runner, bare_cfg)["Vector store"]
         assert row["status"] == "ok"
         assert "sqlite-vec" in row["note"]
+
+    def test_doctor_flags_a_sqlite_vec_that_fails_to_load(
+        self, runner, bare_cfg, monkeypatch
+    ):
+        # #1934 qodo: a discoverable package that cannot load the native
+        # extension must fail, not report a healthy sqlite-vec store.
+        import semantica.vector_store.sqlite_vec_store as sqlite_store
+
+        def _boom(conn):
+            raise OSError("cannot load extension")
+
+        fake = types.ModuleType("sqlite_vec")
+        fake.load = _boom
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", True)
+        monkeypatch.setitem(sys.modules, "sqlite_vec", fake)
+        row = self._checks(runner, bare_cfg)["Vector store"]
+        assert row["status"] == "fail"
+        assert "failed to load" in row["note"]
 
     def test_doctor_flags_a_missing_sqlite_vec_with_an_install_hint(
         self, runner, bare_cfg, monkeypatch
@@ -3809,15 +3832,45 @@ class TestDoctorBackendEnvResolution:
         assert row["status"] == "fail"
         assert "vectorstore-sqlite" in row["note"]
 
+    def test_vector_backend_rejects_an_unsupported_env_value(
+        self, tmp_path, monkeypatch
+    ):
+        # #1934 qodo: the MCP tools reject a backend outside their set, so a
+        # typo must surface as a failure rather than a healthy store.
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqltie")
+        with pytest.raises(ValueError) as excinfo:
+            cli_module._resolve_vector_backend(self._ctx(tmp_path))
+        assert "not supported by the MCP retrieval tools" in str(excinfo.value)
+        assert "supported backends: inmemory, sqlite" in str(excinfo.value)
+
+    def test_doctor_flags_an_unsupported_vector_backend_env(
+        self, runner, bare_cfg, monkeypatch
+    ):
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqltie")
+        row = self._checks(runner, bare_cfg)["Vector store"]
+        assert row["status"] == "fail"
+        assert "sqltie" in row["note"]
+
     def test_memory_graph_path_reads_the_kg_path_env(self, tmp_path, monkeypatch):
         kg = tmp_path / "mcp_graph.json"
         monkeypatch.setenv("SEMANTICA_KG_PATH", str(kg))
-        assert cli_module._memory_graph_path(self._ctx(tmp_path)) == kg
+        path = cli_module._memory_graph_path(self._ctx(tmp_path), allow_env=True)
+        assert path == kg
+
+    def test_memory_graph_path_ignores_the_kg_path_env_for_writes(
+        self, tmp_path, monkeypatch
+    ):
+        # #1934 qodo: only doctor's read-only check may follow SEMANTICA_KG_PATH;
+        # a CLI decision write must not target the MCP server's cached graph.
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "mcp_graph.json"))
+        path = cli_module._memory_graph_path(self._ctx(tmp_path))
+        assert path == cli_module.Path.home() / ".semantica" / "context_graph.json"
 
     def test_config_path_beats_the_kg_path_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "mcp.json"))
         cfg = f"graph_db:\n  backend: memory\n  path: {tmp_path / 'cfg.json'}\n"
-        path = cli_module._memory_graph_path(self._ctx(tmp_path, cfg=cfg))
+        ctx = self._ctx(tmp_path, cfg=cfg)
+        path = cli_module._memory_graph_path(ctx, allow_env=True)
         assert path == tmp_path / "cfg.json"
 
     def test_doctor_counts_decisions_from_the_kg_path_env(
