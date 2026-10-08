@@ -1934,3 +1934,60 @@ class TestProvenanceStorageEnvResolution:
     def test_without_any_configuration_storage_is_in_memory(self):
         pm = ProvenanceManager()
         assert isinstance(pm.storage, InMemoryStorage)
+
+
+class TestPropertySourceReTracking:
+    """#1810 review: re-tracking a property must not break the hash chain.
+
+    The storage key is ``<entity>_<property>``, so a second write used to hit
+    INSERT OR REPLACE and drop the first row's checksum out of the chain while
+    later entries still linked to it. Two trackers sharing one DB (the env-var
+    setup this PR adds) reach that path on every repeated property.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _shared_env_db(self, tmp_path, monkeypatch):
+        for name in ("SEMANTICA_PROVENANCE_DB", "EXPLORER_PROVENANCE_DB"):
+            monkeypatch.delenv(name, raising=False)
+        original = ProvenanceManager._default_storage_path
+        ProvenanceManager._default_storage_path = None
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(tmp_path / "shared.db"))
+        try:
+            yield
+        finally:
+            ProvenanceManager._default_storage_path = original
+
+    def _tracker(self):
+        from semantica.conflicts.conflicts_provenance import (
+            SourceTrackerWithUnifiedBackend,
+        )
+
+        return SourceTrackerWithUnifiedBackend()
+
+    def test_two_trackers_retracking_one_property_keep_the_chain_intact(self):
+        first = self._tracker()
+        second = self._tracker()
+        source_a = SourceReference(document="doc_a", page=1, confidence=0.9)
+        source_b = SourceReference(document="doc_b", page=2, confidence=0.8)
+
+        first.track_property_source("entity_1", "mass", "10kg", source_a)
+        second.track_property_source("entity_1", "mass", "12kg", source_b)
+
+        manager = ProvenanceManager()
+        ids = [e.entity_id for e in manager.storage.retrieve_all()]
+        assert "entity_1_mass" in ids
+        assert any(i.startswith("entity_1_mass:v:") for i in ids)
+        assert manager.verify_chain()["valid"] is True
+
+    def test_the_latest_value_is_the_one_retained(self):
+        tracker = self._tracker()
+        tracker.track_property_source(
+            "entity_1", "mass", "10kg", SourceReference(document="doc_a")
+        )
+        tracker.track_property_source(
+            "entity_1", "mass", "12kg", SourceReference(document="doc_b")
+        )
+
+        entry = ProvenanceManager().storage.retrieve("entity_1_mass")
+        assert entry.metadata["value"] == "12kg"
+        assert entry.parent_entity_id is not None
