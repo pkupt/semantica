@@ -116,7 +116,8 @@ class LinkPredictor:
         method: Optional[str] = None,
         exclude_existing: bool = True,
         chunk_size: int = 1000,
-        graph: Any = None
+        graph: Any = None,
+        directed: Optional[bool] = None
     ) -> List[Tuple[str, str, float]]:
         """
         Predict likely links between nodes.
@@ -129,6 +130,12 @@ class LinkPredictor:
             method: Prediction method to use (overrides default)
             exclude_existing: Whether to exclude existing links
             chunk_size: Process candidates in chunks for memory efficiency
+            directed: Score each ordered pair, excluding only an edge in the
+                same direction. None keeps the undirected behaviour (one
+                candidate per node pair, dropped when either direction already
+                has an edge), which is what an undirected graph wants; a
+                directed graph needs True, otherwise a missing reverse edge is
+                never considered (#1941 review).
             
         Returns:
             List of (node1, node2, score) tuples sorted by score
@@ -155,8 +162,30 @@ class LinkPredictor:
             if exclude_existing:
                 existing_edges = self._get_existing_edges(graph_store, relationship_types)
             
+            if directed:
+                # Ordered pairs: with the undirected candidate set below, an
+                # existing A->B hides a missing B->A, and which direction gets
+                # scored depends on node order (#1941 review). The set from
+                # _get_existing_edges() records both directions of every edge,
+                # so it cannot tell those apart; read the directed edges from
+                # the graph itself when it can expose them. Chunking exists for
+                # memory, not correctness, so this path skips it.
+                directed_edges = existing_edges
+                edges_attr = getattr(graph_store, "edges", None)
+                if callable(edges_attr):
+                    directed_edges = {(u, v) for u, v, *_ in edges_attr()}
+                scores = []
+                for node1 in nodes:
+                    for node2 in nodes:
+                        if node1 == node2:
+                            continue
+                        if exclude_existing and (node1, node2) in directed_edges:
+                            continue
+                        score = self.score_link(graph_store, node1, node2, method)
+                        if score > 0:
+                            scores.append((node1, node2, score))
             # For large graphs, use efficient candidate generation
-            if len(nodes) > chunk_size:
+            elif len(nodes) > chunk_size:
                 scores = []
                 
                 # Process nodes in chunks to manage memory

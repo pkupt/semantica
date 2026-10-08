@@ -341,6 +341,84 @@ class TestKgSubcommands:
         assert result.exit_code != 0
         assert "Traceback" not in result.output
 
+    def test_kg_find_path_accepts_entity_name_when_id_differs(self, runner, monkeypatch):
+        # find-path documents --from/--to as entity names, but the NetworkX
+        # projection is keyed by entity ID; on the memory backend those differ
+        # (recorded decisions carry generated IDs), so the name has to be
+        # resolved before lookup (#1941 review).
+        graph = {
+            "entities": [
+                {"id": "n1", "name": "Alice", "type": "person"},
+                {"id": "n2", "name": "Bob", "type": "person"},
+            ],
+            "relationships": [
+                {"id": "r1", "source": "n1", "target": "n2", "type": "knows"},
+            ],
+        }
+        monkeypatch.setattr(
+            cli_module, "_kg_graph",
+            lambda cli_ctx: cli_module._normalize_kg_dict(graph),
+        )
+        result = runner.invoke(cli_module.main, ["kg", "find-path",
+                                      "--from", "Alice", "--to", "Bob", "--json"])
+        _ok(result)
+        body = json.dumps(_json_output(result))
+        assert "n1" in body and "n2" in body
+
+    def test_kg_find_path_rejects_negative_weight(self, runner, monkeypatch):
+        # Dijkstra settles each node once and never revisits it, so a negative
+        # edge cost can yield a path that is not the cheapest; the command
+        # refuses instead of returning it (#1941 review).
+        graph = {
+            "entities": [
+                {"id": "S", "name": "S"}, {"id": "A", "name": "A"},
+                {"id": "B", "name": "B"},
+            ],
+            "relationships": [
+                {"id": "r1", "source": "S", "target": "A", "type": "e", "weight": 1},
+                {"id": "r2", "source": "S", "target": "B", "type": "e", "weight": 2},
+                {"id": "r3", "source": "B", "target": "A", "type": "e", "weight": -3},
+            ],
+        }
+        monkeypatch.setattr(
+            cli_module, "_kg_graph",
+            lambda cli_ctx: cli_module._normalize_kg_dict(graph),
+        )
+        result = runner.invoke(cli_module.main, ["kg", "find-path",
+                                      "--from", "S", "--to", "A", "--json"])
+        assert result.exit_code != 0
+        assert "non-negative" in _flatten(result.output)
+
+    def test_kg_resolve_exposes_entities_and_says_read_only(self, runner, monkeypatch):
+        # resolve_entities() writes nothing back, so the command must not read
+        # as if it had: it returns the merged entities instead (#1941 review).
+        _fixture_graph(monkeypatch)
+        result = runner.invoke(cli_module.main, ["kg", "resolve", "--json"])
+        data = _json_output(result)
+        assert "entities" in data
+        text = runner.invoke(cli_module.main, ["kg", "resolve"]).output
+        assert "read-only" in _flatten(text)
+
+    def test_graph_store_context_by_id_keeps_same_name_nodes_apart(self, monkeypatch):
+        # Substituting a node's display name for its ID merges two distinct
+        # store nodes that happen to share a name (#1941 review).
+        class _GS:
+            def get_nodes(self, limit=None):
+                return [
+                    {"id": "n1", "properties": {"name": "Alice"}, "labels": ["Person"]},
+                    {"id": "n2", "properties": {"name": "Alice"}, "labels": ["Person"]},
+                ]
+
+            def get_relationships(self, limit=None):
+                return []
+
+        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx, **kw: _GS())
+        by_name = cli_module._graph_store_as_context(None)
+        by_id = cli_module._graph_store_as_context(None, by_id=True)
+        assert [e["id"] for e in by_name["entities"]] == ["Alice", "Alice"]
+        assert [e["id"] for e in by_id["entities"]] == ["n1", "n2"]
+        assert [e["name"] for e in by_id["entities"]] == ["Alice", "Alice"]
+
     def test_kg_resolve_json_counts_fixture_entities(self, runner, monkeypatch):
         _fixture_graph(monkeypatch)
         result = runner.invoke(cli_module.main, ["kg", "resolve", "--json"])

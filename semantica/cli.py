@@ -1661,13 +1661,22 @@ def _graph_store_facts(cli_ctx: CLIContext) -> List[str]:
     return facts
 
 
-def _graph_store_as_context(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any]]]:
+def _graph_store_as_context(
+    cli_ctx: CLIContext, by_id: bool = False
+) -> Dict[str, List[Dict[str, Any]]]:
     """Read the configured graph store into GraphReasoner's expected shape.
 
     GraphReasoner._prepare_graph_context() reads a plain
     ``{"entities": [...], "relationships": [...]}`` dict -- distinct from
     both the raw GraphStore rows and the ``Label(arg)`` fact strings
     ``_graph_store_facts()`` builds for the other engines.
+
+    The default substitutes each node's display name for its ID, which is what
+    the reasoning path wants (facts read better with names). ``by_id`` keeps
+    the real store ID as the entity ID and as the relationship endpoints
+    instead, with the name kept in the entity's ``name`` field: the kg APIs key
+    everything on the entity ID, and two distinct nodes can share a display
+    name, in which case the name-substituting shape merges them (#1941 review).
     """
     gs = _get_graph_store(cli_ctx)
     nodes = gs.get_nodes(limit=sys.maxsize)
@@ -1676,15 +1685,17 @@ def _graph_store_as_context(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any
     entities = []
     for node in nodes:
         props = node.get("properties") or {}
-        name = props.get("name") or props.get("id") or node.get("id")
-        names[node.get("id")] = name
+        node_id = node.get("id")
+        name = props.get("name") or props.get("id") or node_id
+        names[node_id] = node_id if by_id else name
         labels = node.get("labels") or ["Entity"]
         # Multiple labels are all real classifications (mirrors the one
         # fact-per-label convention _graph_store_facts() uses); joining them
         # keeps a node with e.g. ["Person", "Employee"] fully described
         # instead of silently dropping every label but the first.
         entities.append({
-            "id": name, "name": name, "type": "/".join(labels), "properties": props,
+            "id": names[node_id], "name": name, "type": "/".join(labels),
+            "properties": props,
         })
     rel_out = []
     for rel in relationships:
@@ -2059,7 +2070,9 @@ def _kg_graph(cli_ctx: CLIContext) -> Dict[str, Any]:
     """
     if _uses_memory_graph(cli_ctx):
         return _normalize_kg_dict(_load_context_graph(cli_ctx).to_kg_dict())
-    return _graph_store_as_context(cli_ctx)
+    # by_id, not the reasoning path's name substitution: the kg APIs key on the
+    # entity ID, and two store nodes may share a display name (#1941 review).
+    return _graph_store_as_context(cli_ctx, by_id=True)
 
 
 def _kg_nx_graph(cli_ctx: CLIContext) -> Any:
@@ -2080,7 +2093,9 @@ def _kg_nx_graph(cli_ctx: CLIContext) -> Any:
     for entity in kg.get("entities", []):
         node_id = entity.get("id")
         if node_id is not None:
-            graph.add_node(node_id)
+            # Keep the display name on the node so find-path can accept the
+            # entity name its options promise (#1941 review).
+            graph.add_node(node_id, name=entity.get("name"))
     for rel in kg.get("relationships", []):
         source = rel.get("source")
         target = rel.get("target")
@@ -2100,6 +2115,52 @@ def _kg_nx_graph(cli_ctx: CLIContext) -> Any:
             weight = min(weight, existing.get("weight", weight))
         graph.add_edge(source, target, weight=weight, type=rel.get("type"))
     return graph
+
+
+def _resolve_entity(graph: Any, token: str) -> str:
+    """Map an entity name onto its graph node ID.
+
+    kg find-path documents ``--from`` / ``--to`` as entity names, but the
+    NetworkX projection is keyed by entity ID, and on the memory backend those
+    differ (recorded decisions carry generated IDs). Accept an exact node ID
+    first, then a unique display name; an ambiguous name is reported rather
+    than silently picking one (#1941 review).
+    """
+    if token in graph:
+        return token
+    matches = [
+        node for node, attrs in graph.nodes(data=True)
+        if attrs.get("name") == token
+    ]
+    if not matches:
+        raise click.ClickException(
+            f"No entity named '{token}' in the graph. Pass an entity name or ID "
+            "that `semantica kg query` reports."
+        )
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"Entity name '{token}' is ambiguous ({len(matches)} nodes); pass "
+            "the entity ID instead: " + ", ".join(sorted(matches))
+        )
+    return matches[0]
+
+
+def _reject_negative_weights(graph: Any) -> None:
+    """Fail before Dijkstra rather than return a wrong path.
+
+    Dijkstra settles each node once and never revisits it, so a negative edge
+    cost can yield a path that is not the cheapest one. The projection takes
+    whatever weight a relationship carries, so the check lives at the one
+    command that assumes non-negative costs (#1941 review).
+    """
+    for source, target, attrs in graph.edges(data=True):
+        weight = attrs.get("weight")
+        if weight is not None and weight < 0:
+            raise click.ClickException(
+                f"shortest path needs non-negative edge weights, but "
+                f"'{source}' -> '{target}' has weight {weight}; Dijkstra would "
+                "return a path that is not the cheapest."
+            )
 
 
 def _lowercase_datalog_args(fact_str: str) -> str:
@@ -2343,8 +2404,12 @@ def kg_find_path(cli_ctx: CLIContext, from_entity: str, to_entity: str,
         # "relationships"} dict — it duck-types against neighbors()/
         # get_edge_data() and would report "not found" for nodes that are in
         # the graph (#1725) — so it gets the NetworkX projection.
+        graph = _kg_nx_graph(cli_ctx)
+        _reject_negative_weights(graph)
         path = PathFinder().dijkstra_shortest_path(
-            _kg_nx_graph(cli_ctx), from_entity, to_entity
+            graph,
+            _resolve_entity(graph, from_entity),
+            _resolve_entity(graph, to_entity),
         )
         if json_out:
             _jecho(path if isinstance(path, dict) else {"path": path})
@@ -2358,7 +2423,7 @@ def kg_find_path(cli_ctx: CLIContext, from_entity: str, to_entity: str,
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
 def kg_resolve(cli_ctx: CLIContext, local_json: bool) -> None:
-    """Run entity resolution across the knowledge graph."""
+    """Resolve duplicate entities and report the merged result (read-only)."""
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
@@ -2368,7 +2433,10 @@ def kg_resolve(cli_ctx: CLIContext, local_json: bool) -> None:
             raise click.ClickException(f"KG module not available: {exc}") from exc
         # EntityResolver exposes resolve_entities()/merge_duplicates(), never
         # resolve() (#1941), and it resolves a list of entities rather than
-        # reading the store itself.
+        # reading the store itself. It also does not persist anything: the
+        # merged entities exist inside this process only, so the command
+        # reports them instead of claiming a change the store never received
+        # (#1941 review).
         entities = _kg_graph(cli_ctx).get("entities", [])
         resolved = EntityResolver(
             config=cli_ctx.config.to_dict()
@@ -2377,11 +2445,16 @@ def kg_resolve(cli_ctx: CLIContext, local_json: bool) -> None:
             "input": len(entities),
             "resolved": len(resolved),
             "merged": max(len(entities) - len(resolved), 0),
+            "entities": resolved,
         }
         if _is_json(cli_ctx, local_json):
             _jecho(result)
         else:
-            _ok(cli_ctx, f"Entity resolution complete: {result}")
+            _ok(
+                cli_ctx,
+                f"Entity resolution computed (read-only, nothing written back): "
+                f"{len(entities)} in, {len(resolved)} out, {result['merged']} merged",
+            )
 
     _run_with_error_handling(_action)
 
@@ -2405,7 +2478,12 @@ def kg_predict(cli_ctx: CLIContext, local_json: bool) -> None:
         # enumeration is NetworkX-shaped: on the dict or on a ContextGraph
         # it finds no candidate nodes at all and reports 0 predictions on a
         # populated graph (#1725).
-        predictions = LinkPredictor().predict_links(graph=_kg_nx_graph(cli_ctx))
+        # directed=True: the projection is a DiGraph, and the default unordered
+        # candidate generation drops a missing reverse edge whenever the forward
+        # one exists (#1941 review).
+        predictions = LinkPredictor().predict_links(
+            graph=_kg_nx_graph(cli_ctx), directed=True
+        )
         result = {
             "count": len(predictions),
             "predictions": [
