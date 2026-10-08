@@ -2024,6 +2024,84 @@ def _ontology_namespace(ontology: Dict[str, Any]) -> str:
     return DEFAULT_ONTOLOGY_BASE_URI
 
 
+def _normalize_kg_dict(kg: Dict[str, Any]) -> Dict[str, Any]:
+    """Map ``ContextGraph.to_kg_dict()`` onto the shape the kg APIs validate.
+
+    ``to_kg_dict()`` reports relationship endpoints as ``source_id`` /
+    ``target_id`` and carries no entity ``name``, while ``GraphValidator``
+    requires ``source`` / ``target`` / ``name``. ``tests/context/test_to_kg_dict.py``
+    adds ``name`` by hand for the same reason.
+    """
+    entities = []
+    for entity in kg.get("entities", []) or []:
+        mapped = dict(entity)
+        properties = mapped.get("properties") or {}
+        mapped.setdefault("name", mapped.get("text") or properties.get("name")
+                          or mapped.get("id"))
+        mapped.setdefault("type", "Entity")
+        entities.append(mapped)
+    relationships = []
+    for rel in kg.get("relationships", []) or []:
+        mapped = dict(rel)
+        mapped.setdefault("source", mapped.get("source_id"))
+        mapped.setdefault("target", mapped.get("target_id"))
+        relationships.append(mapped)
+    return {"entities": entities, "relationships": relationships}
+
+
+def _kg_graph(cli_ctx: CLIContext) -> Dict[str, Any]:
+    """Load the configured graph as ``{"entities", "relationships"}``.
+
+    The kg wrappers previously called ``validate()`` / ``analyze()`` /
+    ``find_path()`` without ever fetching a graph, so every one of them
+    failed on the missing argument (#1941). Both backends have an existing
+    reader; this just picks one.
+    """
+    if _uses_memory_graph(cli_ctx):
+        return _normalize_kg_dict(_load_context_graph(cli_ctx).to_kg_dict())
+    return _graph_store_as_context(cli_ctx)
+
+
+def _kg_nx_graph(cli_ctx: CLIContext) -> Any:
+    """NetworkX projection of the configured graph, for the traversing APIs.
+
+    ``PathFinder`` duck-types against ``neighbors`` / ``get_edge_data`` and
+    ``LinkPredictor`` against ``get_all_nodes`` / ``has_edge``; the plain
+    ``{"entities", "relationships"}`` dict satisfies neither, so both would
+    silently report "no path" / zero predictions on a populated graph — the
+    same defect explorer hit in #1725, which now hands PathFinder a NetworkX
+    view. ``ContextGraph`` would work for PathFinder but still yields no
+    candidate nodes for ``LinkPredictor``.
+    """
+    import networkx as nx
+
+    kg = _kg_graph(cli_ctx)
+    graph = nx.DiGraph()
+    for entity in kg.get("entities", []):
+        node_id = entity.get("id")
+        if node_id is not None:
+            graph.add_node(node_id)
+    for rel in kg.get("relationships", []):
+        source = rel.get("source")
+        target = rel.get("target")
+        if source is None or target is None:
+            continue
+        properties = rel.get("properties") or {}
+        weight = rel.get("weight", properties.get("weight", 1.0))
+        try:
+            weight = float(weight)
+        except (TypeError, ValueError):
+            weight = 1.0
+        # ContextGraph allows parallel edges; DiGraph keeps one. Keep the
+        # lowest weight so the collapse matches how PathFinder reads weight
+        # as cost (same rule as explorer's build_nx_graph).
+        existing = graph.get_edge_data(source, target)
+        if existing is not None:
+            weight = min(weight, existing.get("weight", weight))
+        graph.add_edge(source, target, weight=weight, type=rel.get("type"))
+    return graph
+
+
 def _lowercase_datalog_args(fact_str: str) -> str:
     """Lowercase only a fact string's arguments, keeping the predicate's
     case untouched.
@@ -2175,9 +2253,11 @@ def kg_stats(cli_ctx: CLIContext, fmt: str, local_json: bool) -> None:
         try:
             from .kg import GraphAnalyzer
 
+            # compute_metrics() returns {} when handed no graph, so this
+            # command used to exit 0 with an empty table (#1941).
             stats = GraphAnalyzer(
                 config=cli_ctx.config.to_dict()
-            ).compute_metrics()
+            ).compute_metrics(graph=_kg_graph(cli_ctx))
         except ImportError as exc:
             raise click.ClickException(f"KG module not available: {exc}") from exc
         if json_out:
@@ -2209,7 +2289,20 @@ def kg_analyze(cli_ctx: CLIContext, mode: str, local_json: bool) -> None:
             from .kg import GraphAnalyzer
         except ImportError as exc:
             raise click.ClickException(f"KG module not available: {exc}") from exc
-        result = GraphAnalyzer(config=cli_ctx.config.to_dict()).analyze(mode=mode)
+        analyzer = GraphAnalyzer(config=cli_ctx.config.to_dict())
+        graph = _kg_graph(cli_ctx)
+        # analyze() takes the graph first and accepts no `mode`: the keyword
+        # used to be swallowed by **options, so every --mode value ran the
+        # whole analysis (#1941). Dispatch to the sub-analyzer instead.
+        if mode == "all":
+            result = analyzer.analyze(graph)
+        else:
+            steps = {
+                "centrality": analyzer.calculate_centrality,
+                "community": analyzer.detect_communities,
+                "connectivity": analyzer.analyze_connectivity,
+            }
+            result = steps[mode](graph)
         if json_out:
             _jecho(result if isinstance(result, dict) else {"result": str(result)})
         else:
@@ -2233,12 +2326,25 @@ def kg_find_path(cli_ctx: CLIContext, from_entity: str, to_entity: str,
     json_out = _is_json(cli_ctx, local_json)
 
     def _action() -> None:
+        # PathFinder implements shortest-path searches only — there is no
+        # semantic or causal variant to dispatch to, so say so instead of
+        # quietly returning a shortest path for a causal question (#1941).
+        if path_type != "shortest":
+            raise click.ClickException(
+                f"--type {path_type} is not supported: PathFinder only "
+                "implements shortest-path searches. Use --type shortest."
+            )
         try:
             from .kg import PathFinder
         except ImportError as exc:
             raise click.ClickException(f"KG module not available: {exc}") from exc
-        path = PathFinder(config=cli_ctx.config.to_dict()).find_path(
-            from_entity, to_entity, path_type=path_type
+        # PathFinder() takes default_algorithm, not config, and exposes no
+        # find_path() (#1941). It also cannot traverse the {"entities",
+        # "relationships"} dict — it duck-types against neighbors()/
+        # get_edge_data() and would report "not found" for nodes that are in
+        # the graph (#1725) — so it gets the NetworkX projection.
+        path = PathFinder().dijkstra_shortest_path(
+            _kg_nx_graph(cli_ctx), from_entity, to_entity
         )
         if json_out:
             _jecho(path if isinstance(path, dict) else {"path": path})
@@ -2260,9 +2366,20 @@ def kg_resolve(cli_ctx: CLIContext, local_json: bool) -> None:
             from .kg import EntityResolver
         except ImportError as exc:
             raise click.ClickException(f"KG module not available: {exc}") from exc
-        result = EntityResolver(config=cli_ctx.config.to_dict()).resolve()
+        # EntityResolver exposes resolve_entities()/merge_duplicates(), never
+        # resolve() (#1941), and it resolves a list of entities rather than
+        # reading the store itself.
+        entities = _kg_graph(cli_ctx).get("entities", [])
+        resolved = EntityResolver(
+            config=cli_ctx.config.to_dict()
+        ).resolve_entities(entities)
+        result = {
+            "input": len(entities),
+            "resolved": len(resolved),
+            "merged": max(len(entities) - len(resolved), 0),
+        }
         if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, dict) else {"result": str(result)})
+            _jecho(result)
         else:
             _ok(cli_ctx, f"Entity resolution complete: {result}")
 
@@ -2281,9 +2398,23 @@ def kg_predict(cli_ctx: CLIContext, local_json: bool) -> None:
             from .kg import LinkPredictor
         except ImportError as exc:
             raise click.ClickException(f"KG module not available: {exc}") from exc
-        result = LinkPredictor(config=cli_ctx.config.to_dict()).predict()
+        # LinkPredictor() takes method=, not config=, and exposes
+        # predict_links(), not predict() (#1941). It returns
+        # (source, target, score) tuples, which the old `str(result)`
+        # fallback would have dumped as one opaque string. Its node
+        # enumeration is NetworkX-shaped: on the dict or on a ContextGraph
+        # it finds no candidate nodes at all and reports 0 predictions on a
+        # populated graph (#1725).
+        predictions = LinkPredictor().predict_links(graph=_kg_nx_graph(cli_ctx))
+        result = {
+            "count": len(predictions),
+            "predictions": [
+                {"source": source, "target": target, "score": score}
+                for source, target, score in predictions
+            ],
+        }
         if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, dict) else {"result": str(result)})
+            _jecho(result)
         else:
             _pprint(cli_ctx, result)
 
@@ -2302,9 +2433,11 @@ def kg_validate_cmd(cli_ctx: CLIContext, local_json: bool) -> None:
             from .kg import GraphValidator
         except ImportError as exc:
             raise click.ClickException(f"KG module not available: {exc}") from exc
-        result = GraphValidator(config=cli_ctx.config.to_dict()).validate()
+        # GraphValidator() takes schema=/strict=, not config=, and validate()
+        # takes the graph (#1941).
+        result = GraphValidator().validate(_kg_graph(cli_ctx)).to_dict()
         if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, dict) else {"result": str(result)})
+            _jecho(result)
         else:
             _ok(cli_ctx, f"Graph validation: {result}")
 
@@ -4541,14 +4674,16 @@ def validate_integrity(cli_ctx: CLIContext, local_json: bool) -> None:
     def _action() -> None:
         try:
             from .kg import GraphValidator
-            v = GraphValidator(config=cli_ctx.config.to_dict())
-            result = v.integrity_check()
         except ImportError as exc:
             raise click.ClickException(f"KG module not available: {exc}") from exc
+        # GraphValidator has no integrity_check() — validate() is its only
+        # structural check, so this subcommand reports that (#1941).
+        result = GraphValidator().validate(_kg_graph(cli_ctx)).to_dict()
         if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, dict) else {"valid": bool(result)})
+            _jecho(result)
         else:
             _ok(cli_ctx, f"Integrity check: {result}")
+
 
     _run_with_error_handling(_action)
 
