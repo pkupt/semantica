@@ -5089,23 +5089,51 @@ def store_flush(cli_ctx: CLIContext, namespace: Optional[str], confirm: bool) ->
     def _action() -> None:
         if not confirm:
             raise click.UsageError("--confirm is required to flush a namespace.")
-        # Clearing a namespace means emptying its vectors while keeping the
-        # namespace itself. manage_namespace() has no "clear" operation, and
-        # delete_vectors() takes vector IDs, not a namespace (#1943); deleting
-        # the namespace object outright is refused for the default namespace,
-        # so resolving the name up front keeps --namespace optional.
+        # A namespace is a metadata convention (store migrate writes
+        # metadata["namespace"]), not a registry that ordinary storage keeps in
+        # sync, so a flush has to enumerate what the configured backend
+        # actually holds instead of reading namespace membership that
+        # store_vectors() never records (#1943). The backend may also be unable
+        # to enumerate at all, and an unsupported capability is not an empty
+        # namespace, so that path fails loudly rather than reporting zero.
+        from .vector_store import VectorStore
+
         vs_cfg = cli_ctx.config.to_dict().get("vector_store", {}) or {}
         target = namespace or vs_cfg.get("default_namespace", "default")
+        backend = vs_cfg.get("default_backend", "faiss")
+        store = VectorStore(backend=backend, config=vs_cfg)
+
+        def _namespace_ids() -> List[str]:
+            return [
+                item["id"]
+                for item in store.iter_vectors()
+                if (item.get("metadata") or {}).get("namespace", "default") == target
+            ]
+
         try:
-            from .vector_store import delete_vectors, manage_namespace
-            vector_ids = manage_namespace(target, "get_vectors") or []
-            if vector_ids:
-                delete_vectors(vector_ids)
-                for vector_id in vector_ids:
-                    manage_namespace(target, "remove_vector", vector_id=vector_id)
-        except ImportError as exc:
-            raise click.ClickException(f"Store module not available: {exc}") from exc
-        _ok(cli_ctx, f"Flushed namespace: {target} ({len(vector_ids)} vectors removed)")
+            vector_ids = _namespace_ids()
+        except NotImplementedError as exc:
+            raise click.ClickException(
+                f"Backend '{backend}' cannot enumerate its stored vectors, so "
+                f"namespace '{target}' cannot be flushed selectively. {exc}"
+            ) from exc
+
+        removed = 0
+        if vector_ids:
+            store.delete_vectors(vector_ids)
+            # Report what is verifiably gone, not what was requested: backends
+            # such as FAISS silently ignore ids they no longer hold, and
+            # delete_vectors() reports success for the call as a whole (#1943).
+            still_there = set(_namespace_ids())
+            removed = sum(1 for vector_id in vector_ids if vector_id not in still_there)
+            if removed == 0:
+                raise click.ClickException(
+                    f"None of the {len(vector_ids)} vectors in namespace "
+                    f"'{target}' were removed; backend '{backend}' may not "
+                    "support deletion for this store."
+                )
+
+        _ok(cli_ctx, f"Flushed namespace: {target} ({removed} vectors removed)")
 
     _run_with_error_handling(_action)
 

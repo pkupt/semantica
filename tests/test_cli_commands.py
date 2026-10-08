@@ -71,6 +71,52 @@ def _json_output(result) -> Any:
     return json.loads(result.output.strip())
 
 
+def _wire_inmemory_vector_store(monkeypatch, namespaces):
+    """Point the CLI at a real in-memory VectorStore, one vector per namespace.
+
+    store flush reads what the backend actually holds, so its tests drive the
+    real VectorStore API instead of stubbing delete_vectors() and
+    manage_namespace() — stubbing those is what hid the fact that the real
+    dispatcher passed vector_id both positionally and as a keyword (#1943).
+    Only the constructor call is redirected, because the CLI's config object
+    cannot be injected through CliRunner. Returns the store so a test can
+    inspect what survived.
+    """
+    import sys as _sys
+
+    import numpy as np
+
+    from semantica.vector_store import VectorStore as _RealVectorStore
+    from semantica.vector_store import vector_store as _vs_mod
+
+    class _StubEmbedder:
+        """Offline stand-in: a real EmbeddingGenerator probes HuggingFace."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def get_embedding_dimension(self) -> int:
+            return 4
+
+        def embed(self, text: str) -> Any:
+            return np.zeros(4)
+
+    monkeypatch.setattr(_vs_mod, "EmbeddingGenerator", _StubEmbedder)
+
+    store = _RealVectorStore(backend="inmemory", config={"dimension": 4})
+    if namespaces:
+        store.store_vectors(
+            [np.zeros(4) for _ in namespaces],
+            metadata=[{"namespace": name} for name in namespaces],
+        )
+    monkeypatch.setitem(
+        _sys.modules,
+        "semantica.vector_store",
+        _fake_module(VectorStore=lambda **kwargs: store),
+    )
+    return store
+
+
 def _flatten(output: str) -> str:
     """Undo Rich panel wrapping for substring assertions on error text.
 
@@ -3026,49 +3072,46 @@ class TestStore:
         assert result.exit_code != 0
         assert "confirm" in result.output.lower() or result.exit_code == 2
 
-    def test_flush_with_confirm(self, runner, monkeypatch):
-        # store flush used to call delete_vectors(namespace=..., config=...),
-        # but delete_vectors takes vector IDs, so every call raised a
-        # TypeError (#1943). Clearing a namespace means emptying its vectors
-        # and its ID mapping while keeping the namespace itself, so the fake
-        # has to serve manage_namespace() as well as delete_vectors().
-        calls = {}
-
-        def _manage(ns: str, operation: str, **kw: Any) -> Any:
-            calls.setdefault("ops", []).append((ns, operation, kw))
-            if operation == "get_vectors":
-                return ["v1", "v2"]
-            return True
-
-        def _delete(vector_ids: Any, **kw: Any) -> bool:
-            calls["deleted"] = list(vector_ids)
-            return True
-
-        fake_vs = _fake_module(delete_vectors=_delete, manage_namespace=_manage)
-        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+    def test_flush_removes_only_the_named_namespace(self, runner, monkeypatch):
+        # The old implementation read a namespace registry that ordinary
+        # storage never populates, so it reported zero removals against real
+        # data (#1943). This drives the real VectorStore API; the previous
+        # fake also hid that manage_namespace() passed vector_id twice.
+        store = _wire_inmemory_vector_store(monkeypatch, ["default", "production"])
         result = runner.invoke(cli_module.main, ["store", "flush", "--confirm"])
         _ok(result)
-        assert calls["deleted"] == ["v1", "v2"]
-        assert ("default", "remove_vector", {"vector_id": "v1"}) in calls["ops"]
-        assert ("default", "remove_vector", {"vector_id": "v2"}) in calls["ops"]
+        assert "1 vectors removed" in result.output
+        remaining = [item["metadata"]["namespace"] for item in store.iter_vectors()]
+        assert remaining == ["production"]
 
-    def test_flush_empty_namespace_does_not_delete(self, runner, monkeypatch):
-        calls = {}
-
-        def _delete(vector_ids: Any, **kw: Any) -> bool:
-            calls["deleted"] = list(vector_ids)
-            return True
-
-        fake_vs = _fake_module(
-            delete_vectors=_delete,
-            manage_namespace=lambda ns, operation, **kw: [],
-        )
-        monkeypatch.setitem(__import__("sys").modules, "semantica.vector_store", fake_vs)
+    def test_flush_reports_zero_for_an_empty_namespace(self, runner, monkeypatch):
+        store = _wire_inmemory_vector_store(monkeypatch, ["default"])
         result = runner.invoke(
             cli_module.main, ["store", "flush", "--namespace", "nope", "--confirm"])
         _ok(result)
-        assert "deleted" not in calls
         assert "nope" in result.output and "0 vectors" in result.output
+        assert len(list(store.iter_vectors())) == 1
+
+    def test_flush_fails_loudly_when_backend_cannot_enumerate(
+        self, runner, monkeypatch
+    ):
+        # An unsupported capability is not the same as an empty namespace, so
+        # the command must not report a successful zero-vector flush.
+        class _NoEnumeration:
+            def __init__(self, **kwargs: Any) -> None:
+                pass
+
+            def iter_vectors(self, batch_size: int = 500):
+                raise NotImplementedError("no scan_vectors() on this backend")
+
+        monkeypatch.setitem(
+            __import__("sys").modules,
+            "semantica.vector_store",
+            _fake_module(VectorStore=_NoEnumeration),
+        )
+        result = runner.invoke(cli_module.main, ["store", "flush", "--confirm"])
+        assert result.exit_code != 0
+        assert "cannot enumerate" in _flatten(result.output)
 
     def test_stats_requires_backend(self, runner):
         result = runner.invoke(cli_module.main, ["store", "stats"])
