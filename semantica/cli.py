@@ -1688,11 +1688,24 @@ def _graph_store_as_context(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any
         })
     rel_out = []
     for rel in relationships:
-        source = names.get(rel.get("start_node_id"), rel.get("start_node_id"))
-        target = names.get(rel.get("end_node_id"), rel.get("end_node_id"))
+        source_id = rel.get("start_node_id")
+        target_id = rel.get("end_node_id")
+        source = names.get(source_id, source_id)
+        target = names.get(target_id, target_id)
+        rel_type = rel.get("type", "RELATED_TO")
+        # ConflictDetector groups relationships by `id`, falling back to
+        # ``{source_id}_{target_id}_{type}``. Store rows carry neither field, so
+        # every edge of one type collapsed into a single group and unrelated
+        # edges with different properties were reported as a conflict (#1814
+        # review). Fill both, keyed the same way the entities above are keyed
+        # (by name) so endpoints stay resolvable.
         rel_out.append({
-            "source": source, "target": target,
-            "type": rel.get("type", "RELATED_TO"),
+            "id": rel.get("id") or f"{source}_{target}_{rel_type}",
+            "source_id": source,
+            "target_id": target,
+            "source": source,
+            "target": target,
+            "type": rel_type,
             "properties": rel.get("properties") or {},
         })
     return {"entities": entities, "relationships": rel_out}
@@ -1716,6 +1729,48 @@ def _knowledge_graph_dict(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any]]
     return _graph_store_as_context(cli_ctx)
 
 
+def _flatten_properties(entity: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy an entity with its nested business attributes lifted to the top level.
+
+    Both graph adapters keep an entity's attributes under ``properties``, while
+    the consumers behind these commands (ontology property inference, conflict
+    detection) read top-level keys. Structural fields win on a name clash so
+    ``id``/``type`` keep their meaning.
+    """
+    flattened = dict(entity)
+    for key, value in (entity.get("properties") or {}).items():
+        flattened.setdefault(key, value)
+    return flattened
+
+
+def _ontology_input_graph(
+    graph: Dict[str, List[Dict[str, Any]]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Adapt a graph for OntologyGenerator's entity shape.
+
+    Its property inference reads top-level keys and lists ``properties`` itself
+    as a control field. A graph read from a backend therefore produced an
+    ontology with no property shapes at all, and ``validate shacl`` checked the
+    classes while ignoring every attribute (#1814 review).
+    """
+    return {
+        "entities": [_flatten_properties(e) for e in graph.get("entities", [])],
+        "relationships": graph.get("relationships", []),
+    }
+
+
+def _conflict_entities(
+    graph: Dict[str, List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
+    """Adapt a graph for ConflictDetector's entity shape.
+
+    Its value and property strategies read ``property_name`` off the entity
+    itself, so a stored attribute under ``properties`` was never compared and
+    no conflict was reported (#1814 review).
+    """
+    return [_flatten_properties(e) for e in graph.get("entities", [])]
+
+
 def _ontology_from_graph(
     cli_ctx: CLIContext, graph: Optional[Dict[str, List[Dict[str, Any]]]] = None
 ) -> Dict[str, Any]:
@@ -1723,34 +1778,127 @@ def _ontology_from_graph(
     from .ontology import OntologyGenerator
 
     data = graph if graph is not None else _knowledge_graph_dict(cli_ctx)
-    return OntologyGenerator(config=cli_ctx.config.to_dict()).generate_ontology(data)
+    return OntologyGenerator(config=cli_ctx.config.to_dict()).generate_ontology(
+        _ontology_input_graph(data)
+    )
+
+
+def _term_iris_by_source(
+    ontology: Dict[str, Any], namespace: Optional[str] = None
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """Map each graph key to the IRI the SHACL shapes target for it.
+
+    Class and property inference rename their inputs (``people`` becomes
+    ``Person``, and attribute names are normalized too), and the shapes are
+    built from those normalized names. Serializing an entity's raw type put its
+    data in a class no shape targets, so pySHACL saw zero focus nodes and
+    reported conformance without checking anything (#1814 review). Every
+    generated term records the graph key it came from in
+    ``metadata.inferred_from``, which is the mapping back. ``namespace`` rebases
+    the terms when the data has to live in a vocabulary other than the
+    ontology's own.
+    """
+    import rdflib
+
+    rebase = rdflib.Namespace(namespace) if namespace else None
+
+    def _iri(term: Dict[str, Any]) -> Optional[str]:
+        uri = term.get("uri")
+        if not uri:
+            return None
+        text = str(uri)
+        if rebase is None:
+            return text
+        cut = max(text.rfind("#"), text.rfind("/"))
+        local = text[cut + 1:] if cut != -1 else text
+        return str(rebase[local]) if local else text
+
+    classes: Dict[str, str] = {}
+    for cls in ontology.get("classes", []):
+        if isinstance(cls, dict):
+            source = (cls.get("metadata") or {}).get("inferred_from")
+            iri = _iri(cls)
+            if source and iri:
+                classes.setdefault(str(source), iri)
+    properties: Dict[str, str] = {}
+    for prop in ontology.get("properties", []):
+        if isinstance(prop, dict):
+            source = (prop.get("metadata") or {}).get("inferred_from")
+            iri = _iri(prop)
+            if source and iri:
+                properties.setdefault(str(source), iri)
+    return classes, properties
+
+
+def _shacl_data_namespace(ontology: Dict[str, Any], shapes_path: Optional[str]) -> str:
+    """The vocabulary the data graph has to be minted in to meet the shapes.
+
+    Shapes generated from the ontology target the ontology's own terms, so its
+    namespace is right. Shapes read from a file target whatever vocabulary that
+    file declares; minting data in the ontology namespace would leave every
+    shape with zero focus nodes, which pySHACL reports as conforming (#1814
+    review). Read the file's target classes and paths and use their namespace,
+    falling back to the ontology namespace when the file names none or spans
+    several.
+    """
+    if not shapes_path:
+        return _ontology_namespace(ontology)
+    try:
+        import rdflib
+
+        shapes = rdflib.Graph()
+        shapes.parse(shapes_path, format="turtle")
+        sh = rdflib.Namespace("http://www.w3.org/ns/shacl#")
+        namespaces = set()
+        for predicate in (sh.targetClass, sh.path):
+            for obj in shapes.objects(None, predicate):
+                if not isinstance(obj, rdflib.URIRef):
+                    continue
+                iri = str(obj)
+                cut = max(iri.rfind("#"), iri.rfind("/"))
+                if cut != -1:
+                    namespaces.add(iri[: cut + 1])
+        if len(namespaces) == 1:
+            return namespaces.pop()
+    except Exception:
+        pass
+    return _ontology_namespace(ontology)
 
 
 def _shacl_data_graph_turtle(
-    graph: Dict[str, List[Dict[str, Any]]], namespace: str
+    graph: Dict[str, List[Dict[str, Any]]],
+    namespace: str,
+    class_iris: Optional[Dict[str, str]] = None,
+    property_iris: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Serialize graph instances as Turtle in the ontology's own namespace.
+    """Serialize graph instances as Turtle in the shapes' own vocabulary.
 
     `RDFSerializer` mints terms in its own vocabulary and drops entity
     properties, so shapes generated from an ontology would target classes and
     paths no exported graph carries. pySHACL treats a shape with zero matching
-    focus nodes as conforming, so that mismatch reads as a silent pass. Building
-    the data graph in the ontology's namespace keeps the two aligned, which is
-    what lets a real violation be reported instead of swallowed.
+    focus nodes as conforming, so that mismatch reads as a silent pass. The
+    entity type and attribute keys are translated through ``class_iris`` /
+    ``property_iris`` (the names the shapes actually target) and everything
+    else is minted in ``namespace``, which keeps the two graphs aligned.
     """
     import rdflib
 
     ns = rdflib.Namespace(namespace)
+    class_iris = class_iris or {}
+    property_iris = property_iris or {}
     data = rdflib.Graph()
     for entity in graph.get("entities", []):
         node_id = entity.get("id") or entity.get("name") or entity.get("text")
         if not node_id:
             continue
         subject = ns[str(node_id)]
-        data.add((subject, rdflib.RDF.type, ns[str(entity.get("type") or "Entity")]))
+        raw_type = str(entity.get("type") or "Entity")
+        class_iri = class_iris.get(raw_type) or str(ns[raw_type])
+        data.add((subject, rdflib.RDF.type, rdflib.URIRef(class_iri)))
         for key, value in (entity.get("properties") or {}).items():
             if isinstance(value, (str, int, float, bool)):
-                data.add((subject, ns[str(key)], rdflib.Literal(value)))
+                prop_iri = property_iris.get(str(key)) or str(ns[str(key)])
+                data.add((subject, rdflib.URIRef(prop_iri), rdflib.Literal(value)))
     for rel in graph.get("relationships", []):
         source = rel.get("source_id") or rel.get("source")
         target = rel.get("target_id") or rel.get("target")
@@ -4204,7 +4352,13 @@ def validate_shacl(cli_ctx: CLIContext, shapes: Optional[str], strictness: str,
             ) from exc
         graph = _knowledge_graph_dict(cli_ctx)
         ontology = _ontology_from_graph(cli_ctx, graph)
-        data_graph = _shacl_data_graph_turtle(graph, _ontology_namespace(ontology))
+        ontology_namespace = _ontology_namespace(ontology)
+        data_namespace = _shacl_data_namespace(ontology, shapes)
+        rebase = data_namespace if data_namespace != ontology_namespace else None
+        class_iris, property_iris = _term_iris_by_source(ontology, rebase)
+        data_graph = _shacl_data_graph_turtle(
+            graph, data_namespace, class_iris, property_iris
+        )
         shapes_graph = _shacl_shapes_turtle(ontology, shapes, strictness)
         try:
             shacl_report = run_shacl_validation(data_graph, shapes_graph)
@@ -4268,11 +4422,18 @@ def validate_conflicts(
         graph = _knowledge_graph_dict(cli_ctx)
         detector = ConflictDetector(config=cli_ctx.config.to_dict())
         conflicts = detector.detect_conflicts(
-            graph,
+            _conflict_entities(graph),
             method=strategy,
             property_name=property_name,
             relationships=graph.get("relationships", []),
         )
+        # The detector's "all" method never dispatches its relationship
+        # strategy, so the relationships this command reads went unexamined on
+        # the default run (#1814 review).
+        if strategy == "all":
+            conflicts = list(conflicts) + detector.detect_relationship_conflicts(
+                graph.get("relationships", [])
+            )
         payload = {
             "conflicts": _serialize_extract_result(conflicts),
             "count": len(conflicts),
@@ -4353,6 +4514,18 @@ def ontology_generate(cli_ctx: CLIContext, domain: Optional[str], output: Option
     _run_with_error_handling(_action)
 
 
+# The CLI advertises rdflib's public format names, but the ingestor hands an
+# explicit format straight to `Dataset.parse`, which wants its own parser names.
+# Passing the advertised name through meant `rdfxml`, `jsonld` and `ntriples`
+# never reached the XML, JSON-LD or N-Triples parser (#1814 review).
+_ONTOLOGY_IMPORT_FORMATS = {
+    "turtle": "turtle",
+    "rdfxml": "xml",
+    "jsonld": "json-ld",
+    "ntriples": "nt",
+}
+
+
 @ontology.command("import")
 @click.argument("source")
 @click.option("--format", "fmt",
@@ -4380,7 +4553,7 @@ def ontology_import(cli_ctx: CLIContext, source: str, fmt: Optional[str],
             from .ontology import ingest_ontology
             ingest_kwargs: Dict[str, Any] = {}
             if fmt:
-                ingest_kwargs["format"] = fmt
+                ingest_kwargs["format"] = _ONTOLOGY_IMPORT_FORMATS[fmt]
             result = ingest_ontology(source, **ingest_kwargs)
         except ImportError as exc:
             raise click.ClickException(f"Ontology module not available: {exc}") from exc
@@ -4556,7 +4729,13 @@ def ontology_health(cli_ctx: CLIContext, fmt: str, local_json: bool) -> None:
             from .ontology import OntologyEngine
         except ImportError as exc:
             raise click.ClickException(f"Ontology module not available: {exc}") from exc
-        report = OntologyEngine().quality_check(_ontology_from_graph(cli_ctx))
+        # Read the graph once and hand it to the quality gate as well: the
+        # generated ontology does not retain the instances, so without this the
+        # report omitted every instance-level check (#1814 review).
+        graph = _knowledge_graph_dict(cli_ctx)
+        report = OntologyEngine().quality_check(
+            _ontology_from_graph(cli_ctx, graph), graph_data=graph
+        )
         payload = _serialize_extract_result(report)
         if _is_json(cli_ctx, local_json) or fmt == "json":
             _jecho(payload if isinstance(payload, dict) else {"health": payload})
@@ -4567,9 +4746,12 @@ def ontology_health(cli_ctx: CLIContext, fmt: str, local_json: bool) -> None:
 
 
 @ontology.command("version")
+@click.option("--storage", "storage_path", default=None, type=click.Path(),
+              help="SQLite store holding saved ontology snapshots.")
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def ontology_version(cli_ctx: CLIContext, local_json: bool) -> None:
+def ontology_version(cli_ctx: CLIContext, storage_path: Optional[str],
+                     local_json: bool) -> None:
     """Manage ontology versions."""
     cli_ctx = _require_ctx(cli_ctx)
 
@@ -4580,11 +4762,33 @@ def ontology_version(cli_ctx: CLIContext, local_json: bool) -> None:
             raise click.ClickException(
                 f"Change management module not available: {exc}"
             ) from exc
-        versions = OntologyVersionManager(**cli_ctx.config.to_dict()).list_versions()
+        # OntologyVersionManager keeps an in-memory store unless it is handed a
+        # path, and Config.to_dict() has no top-level one, so the command read a
+        # fresh store and reported "no versions" no matter what another process
+        # had saved (#1814 review). Resolve the shared store from the flag or
+        # `custom.ontology.version_storage_path` — Config keeps a fixed set of
+        # sections, so a setting outside them only survives under `custom`.
+        storage = storage_path or cli_ctx.config.get(
+            "custom.ontology.version_storage_path"
+        )
+        manager = (
+            OntologyVersionManager(storage_path=storage)
+            if storage
+            else OntologyVersionManager()
+        )
+        versions = manager.list_versions()
         if versions:
             result = max(versions, key=lambda s: str(s.get("timestamp") or ""))
-        else:
+        elif storage:
             result = {"version": None, "message": "No ontology versions recorded yet."}
+        else:
+            result = {
+                "version": None,
+                "message": (
+                    "No persistent version store selected; pass --storage or set "
+                    "ontology.version_storage_path to read saved snapshots."
+                ),
+            }
         if _is_json(cli_ctx, local_json):
             _jecho(result if isinstance(result, dict) else {"version": str(result)})
         else:
