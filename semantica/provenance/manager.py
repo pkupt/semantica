@@ -634,7 +634,29 @@ class ProvenanceManager:
             activity_ended_at_time=activity_info["activity_ended_at_time"],
         )
 
-        return self._save_entry(entry)
+        # The storage key is ``<entity>_<property>``, so re-tracking the same
+        # property (a corrected value, or two trackers sharing one DB through
+        # SEMANTICA_PROVENANCE_DB) would otherwise hit INSERT OR REPLACE: the
+        # previous row's checksum leaves the chain while later entries still
+        # link to it, and verify_chain() reports a broken chain (issue #1810
+        # review). Archive the previous record under a stable versioned key
+        # first, exactly as track_entity()/invalidate() do, a pure relabel, so
+        # its checksum/sequence_id/previous_checksum stay untouched.
+        with self.storage.transaction() as conn:
+            existing = self.storage._retrieve_with_conn(conn, entry.entity_id)
+            if existing:
+                history_entry = copy.deepcopy(existing)
+                base_history_id = f"{entry.entity_id}:v:{existing.last_updated}"
+                history_id = base_history_id
+                counter = 1
+                while self.storage._retrieve_with_conn(conn, history_id):
+                    history_id = f"{base_history_id}:{counter}"
+                    counter += 1
+                history_entry.entity_id = history_id
+                self.storage._store_with_conn(conn, history_entry)
+                entry.parent_entity_id = history_id
+
+            return self._save_entry(entry, _conn=conn)
     
     # === Batch Operations ===
     
