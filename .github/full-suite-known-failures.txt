@@ -17,9 +17,9 @@
 #                    exercised at all.
 #   # non-strict     the hook marks the id xfail(strict=False), in CI as well as
 #                    locally: it keeps running, but a pass is reported as XPASS
-#                    without failing the run. Used for the order-dependent pair,
-#                    which passes in isolation and only fails in a single-process
-#                    run.
+#                    without failing the run. For an entry that genuinely varies
+#                    with run order; none needs it today, so every entry below is
+#                    strict in CI.
 #
 # Provenance. Generated on a clean checkout of
 #
@@ -76,12 +76,17 @@ tests/test_embedding_providers.py::TestEmbeddingProviders::test_sentence_transfo
 tests/test_model_selection.py::TestModelSelection::test_dynamic_switching
 tests/test_model_selection.py::TestModelSelection::test_generator_switching
 
-# --- Order-dependent: these pass in isolation, fail in a full run -------------
-# The progress tracker is process-wide state; whichever test enables it first
-# decides what the next one observes. They run under a non-strict xfail, so
-# whichever way the order falls the run is not failed by it.
-tests/test_arrow_exporter.py::TestArrowExporter::test_progress_tracking  # non-strict
-tests/vector_store/test_backward_compatibility.py::TestVectorStoreBackwardCompatibility::test_progress_tracking_unchanged  # non-strict
+# --- Progress tracking is forced off for the whole process --------------------
+# `semantica_mcp/mcp/__init__.py` sets `SEMANTICA_DISABLE_PROGRESS=1` at import
+# and `tests/test_mcp_package_export_graphml_parquet.py` sets it at module scope
+# as well, so the variable is already set while pytest collects the suite.
+# `ProgressTracker.enabled` then latches disabled for the process
+# (`progress_tracker.py:1140`) and the re-enable in `arrow_exporter.py:205` is a
+# no-op. Both pass alone and fail in every full-suite run — collection of the
+# MCP modules decides it, not the order — so they stay strict: fixing the
+# isolation makes them pass and the XPASS forces these lines out.
+tests/test_arrow_exporter.py::TestArrowExporter::test_progress_tracking
+tests/vector_store/test_backward_compatibility.py::TestVectorStoreBackwardCompatibility::test_progress_tracking_unchanged
 
 # --- Assertion drift in the test or its expectation ---------------------------
 tests/export/test_distance_exporter.py::test_hop_distance_no_warning_when_kg_unavailable

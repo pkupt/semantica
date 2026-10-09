@@ -180,10 +180,8 @@ jobs:
           # catches it.
           #
           # A line is deselected here only when it carries the `# windows-only`
-          # marker and this is a Windows runner. The order-dependent pair, which
-          # passes on its own and only fails in the single-process run, carries
-          # `# non-strict` instead: the hook still marks it xfail, but a pass is
-          # not a failure.
+          # marker and this is a Windows runner. Every other line reaches the
+          # hook, which marks it xfail strictly here in CI.
           #
           # `# windows-only` is deselected on Windows alone — a symlink that
           # needs a privilege, for instance. On Linux the line is left out, so
