@@ -46,3 +46,29 @@ def test_directed_none_matches_the_default_behaviour():
     }
 
     assert explicit_none == default
+
+
+def test_directed_chunking_does_not_change_the_result():
+    """The directed loop is chunked for memory, so the chunk size must not
+    change which ordered pairs get scored."""
+    graph = nx.DiGraph()
+    graph.add_edges_from(
+        (f"n{i}", f"n{(i + 1) % 7}") for i in range(7)
+    )
+    predictor = LinkPredictor(method="preferential_attachment")
+
+    whole = {
+        (a, b)
+        for a, b, _ in predictor.predict_links(
+            graph, top_k=100, directed=True, chunk_size=1000
+        )
+    }
+    chunked = {
+        (a, b)
+        for a, b, _ in predictor.predict_links(
+            graph, top_k=100, directed=True, chunk_size=2
+        )
+    }
+
+    assert whole
+    assert chunked == whole

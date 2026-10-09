@@ -168,22 +168,37 @@ class LinkPredictor:
                 # scored depends on node order (#1941 review). The set from
                 # _get_existing_edges() records both directions of every edge,
                 # so it cannot tell those apart; read the directed edges from
-                # the graph itself when it can expose them. Chunking exists for
-                # memory, not correctness, so this path skips it.
+                # the graph itself when it can expose them.
                 directed_edges = existing_edges
                 edges_attr = getattr(graph_store, "edges", None)
                 if callable(edges_attr):
                     directed_edges = {(u, v) for u, v, *_ in edges_attr()}
                 scores = []
-                for node1 in nodes:
-                    for node2 in nodes:
-                        if node1 == node2:
-                            continue
-                        if exclude_existing and (node1, node2) in directed_edges:
-                            continue
-                        score = self.score_link(graph_store, node1, node2, method)
-                        if score > 0:
-                            scores.append((node1, node2, score))
+
+                def _score_ordered(source: Any, target: Any) -> None:
+                    if source == target:
+                        return
+                    if exclude_existing and (source, target) in directed_edges:
+                        return
+                    score = self.score_link(graph_store, source, target, method)
+                    if score > 0:
+                        scores.append((source, target, score))
+
+                # Chunked like the undirected path below: chunking is about
+                # memory, and without it this loop holds every ordered pair it
+                # scores. Both directions of each unordered pair are scored, so
+                # the chunked traversal still covers all n*(n-1) ordered pairs.
+                for i in range(0, len(nodes), chunk_size):
+                    chunk_nodes = nodes[i:i + chunk_size]
+                    for j, node1 in enumerate(chunk_nodes):
+                        for node2 in chunk_nodes[j + 1:]:
+                            _score_ordered(node1, node2)
+                            _score_ordered(node2, node1)
+                        for prev_start in range(0, i, chunk_size):
+                            prev_chunk = nodes[prev_start:prev_start + chunk_size]
+                            for node2 in prev_chunk:
+                                _score_ordered(node1, node2)
+                                _score_ordered(node2, node1)
             # For large graphs, use efficient candidate generation
             elif len(nodes) > chunk_size:
                 scores = []
