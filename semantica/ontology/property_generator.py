@@ -261,11 +261,10 @@ class PropertyGenerator:
             metadata = existing.setdefault("metadata", {})
             incoming_source = (prop.get("metadata") or {}).get("inferred_from")
             if isinstance(incoming_source, str):
-                sources = metadata.setdefault(
-                    "inferred_from_all", [metadata.get("inferred_from")]
-                )
-                if incoming_source not in sources:
-                    sources.append(incoming_source)
+                sources = metadata.setdefault("inferred_from_all", [])
+                for source in (metadata.get("inferred_from"), incoming_source):
+                    if source is not None and source not in sources:
+                        sources.append(source)
             if prop.get("type") == "object":
                 existing["range"] = self._merge_property_values(
                     existing.get("range", []), prop.get("range", [])
