@@ -66,15 +66,11 @@ tests/ingest/test_ingestors.py::TestUnifiedIngest::test_ingest_web_dispatch
 tests/ingest/test_ingestors.py::TestWebIngestor::test_ingest_url
 
 # --- Local embedding backend unavailable offline ------------------------------
-# `128 != 384` and `'fallback' != 'sentence_transformers'`: the real model could
-# not be loaded in this environment, so the fallback backend answers instead.
 # The generator-config case is the exception: on the Linux runner the model does
 # load and the test passes, so it is marked `# windows-only` rather than left to
-# a strict xfail that would fail on that pass.
+# a strict xfail that would fail on that pass. The rest of this group is gone:
+# #1931 restored the semantic_extract config isolation and they now pass.
 tests/test_embedding_providers.py::TestEmbeddingProviders::test_embedding_generator_config  # windows-only
-tests/test_embedding_providers.py::TestEmbeddingProviders::test_sentence_transformers_default
-tests/test_model_selection.py::TestModelSelection::test_dynamic_switching
-tests/test_model_selection.py::TestModelSelection::test_generator_switching
 
 # --- Progress tracking is forced off for the whole process --------------------
 # `semantica_mcp/mcp/__init__.py` sets `SEMANTICA_DISABLE_PROGRESS=1` at import
@@ -94,7 +90,6 @@ tests/ingest/test_repo_ingestor_security.py::TestIsReservedNAT64Regression::test
 tests/integrations/agno/test_context_store.py::TestAgnoContextStoreUpsertNERAttributes::test_upsert_indexes_entity_label_as_type
 tests/integrations/agno/test_context_store.py::TestAgnoContextStoreUpsertNERAttributes::test_upsert_indexes_entity_text_not_repr
 tests/semantic_extract/test_cache_backends.py::test_zero_ttl_expires_immediately_on_both_backends  # windows-only
-tests/vector_store/test_hybrid_similarity.py::TestHybridSimilarityCalculator::test_pearson_similarity_calculation
 tests/vector_store/test_vector_store.py::test_backend_mirroring_and_save
 
 # --- Integration tests outside the two dedicated integration directories ------
@@ -109,10 +104,10 @@ tests/vector_store/test_vector_store.py::test_backend_mirroring_and_save
 #
 # `test_06_hybrid_search` used to sit here: it failed because `HybridSearch`
 # dropped the `filter=` argument. #1827 fixed that, the test now passes on the
-# runner, and its line is gone.
+# runner, and its line is gone. `test_03_model_switching` was here too; #1931
+# turned it green.
 tests/ingest/test_notebook_02.py::TestNotebook02DataIngestion::test_03_web_ingestion
 tests/ingest/test_notebook_02.py::TestNotebook02DataIngestion::test_08_database_ingestion
-tests/test_all_features.py::TestSemanticaFeatures::test_03_model_switching
 tests/test_semantic_extract_deepdive.py::TestSemanticExtractDeepDive::test_ner_extractor_pattern
 tests/test_semantic_extract_deepdive_part2.py::TestSemanticExtractDeepDivePart2::test_coreference_resolver_pronouns
 tests/test_semantic_extract_deepdive_part2.py::TestSemanticExtractDeepDivePart2::test_event_detector_basic
