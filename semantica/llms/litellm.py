@@ -170,6 +170,8 @@ class LiteLLM:
             )
             
             # Metadata the provenance wrappers read back off the returned value.
+            # Only usage and cost are kept: the rest of _hidden_params can hold
+            # api_base and provider response headers.
             hidden_params = getattr(response, '_hidden_params', None) or {}
             usage = getattr(response, 'usage', None)
             if usage is None and isinstance(response, dict):
@@ -177,7 +179,6 @@ class LiteLLM:
             meta = {
                 "usage": usage,
                 "cost": hidden_params.get('response_cost'),
-                "hidden_params": hidden_params,
             }
 
             def _wrap(content):

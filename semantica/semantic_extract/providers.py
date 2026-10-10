@@ -163,12 +163,10 @@ class ResponseText(str):
         text: str,
         usage: Any = None,
         cost: Optional[float] = None,
-        hidden_params: Optional[Dict[str, Any]] = None,
     ) -> "ResponseText":
         instance = super().__new__(cls, text if text is not None else "")
         instance.usage = usage
         instance.cost = cost
-        instance._hidden_params = hidden_params or {}
         return instance
 
 

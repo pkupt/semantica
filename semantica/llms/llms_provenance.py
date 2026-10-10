@@ -44,8 +44,31 @@ License: MIT
 
 from typing import Optional, Any
 from datetime import datetime
+import json
 import time
 import uuid
+
+from pydantic import BaseModel
+
+
+def _preview_result(result: Any) -> Optional[str]:
+    """Render a structured/typed result as a 200-char preview.
+
+    Serializes the whole value, so a Pydantic model with a ``text`` or
+    ``content`` field is not reduced to that one field.
+    """
+    if result is None:
+        return None
+    if isinstance(result, BaseModel):
+        preview = result.model_dump_json()
+    elif isinstance(result, (dict, list)):
+        try:
+            preview = json.dumps(result, default=str)
+        except (TypeError, ValueError):
+            preview = str(result)
+    else:
+        preview = str(result)
+    return preview[:200]
 
 
 class LLMProvenanceMixin:
@@ -168,10 +191,12 @@ class LLMProvenanceMixin:
         activity_ended_at_time = datetime.utcnow().isoformat()
 
         if self.provenance:
+            # Pass the serialized preview rather than the raw result, so
+            # _track_llm_call does not pick a model's .text/.content field.
             self._track_llm_call(
                 call_id=f"{call_id_prefix}_{uuid.uuid4().hex[:8]}",
                 prompt=prompt,
-                response=result,
+                response=_preview_result(result),
                 generation_mode=kind,
                 latency_seconds=elapsed,
                 activity_started_at_time=activity_started_at_time,
@@ -542,11 +567,8 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
                 prompt_tokens = getattr(response.usage, 'prompt_tokens', None)
                 completion_tokens = getattr(response.usage, 'completion_tokens', None)
 
-            if (
-                hasattr(response, '_hidden_params')
-                and 'response_cost' in response._hidden_params
-            ):
-                total_cost = response._hidden_params['response_cost']
+            if hasattr(response, 'cost'):
+                total_cost = response.cost
 
             self._track_llm_call(
                 call_id=f"lite_call_{uuid.uuid4().hex[:8]}",

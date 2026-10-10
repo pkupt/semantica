@@ -18,8 +18,12 @@ provider that stops carrying usage/cost turns the suite red.
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
-from semantica.llms.llms_provenance import GroqLLMWithProvenance
+from semantica.llms.llms_provenance import (
+    GroqLLMWithProvenance,
+    LiteLLMWithProvenance,
+)
 from semantica.semantic_extract.providers import (
     GroqProvider,
     OpenAIProvider,
@@ -158,16 +162,12 @@ class TestResponseText:
         text = ResponseText("hello")
         assert text.usage is None
         assert text.cost is None
-        assert text._hidden_params == {}
 
-    def test_carries_usage_cost_and_hidden_params(self):
+    def test_carries_usage_and_cost(self):
         usage = SimpleNamespace(prompt_tokens=1, completion_tokens=2)
-        text = ResponseText(
-            "hi", usage=usage, cost=0.5, hidden_params={"response_cost": 0.5}
-        )
+        text = ResponseText("hi", usage=usage, cost=0.5)
         assert text.usage is usage
         assert text.cost == 0.5
-        assert text._hidden_params == {"response_cost": 0.5}
 
 
 @pytest.mark.parametrize(
@@ -272,6 +272,24 @@ class TestProvidersCarryUsageAndCost:
         assert result == "answer"
         assert result.usage is not None
         assert result.cost == 0.007
+        # The rest of _hidden_params (api_base, response headers) is not kept.
+        assert not hasattr(result, "_hidden_params")
+
+    def test_litellm_missing_response_cost_is_none(self, monkeypatch):
+        import semantica.llms.litellm as litellm_module
+
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))],
+            usage=None,
+            _hidden_params={"api_base": "https://example.invalid"},
+        )
+        monkeypatch.setattr(litellm_module, "LITELLM_AVAILABLE", True)
+        monkeypatch.setattr(litellm_module, "completion", lambda **kwargs: response)
+
+        result = litellm_module.LiteLLM(model="openai/gpt-4o").generate("question")
+
+        assert result == "answer"
+        assert result.cost is None
 
 
 class TestNoneReplyStaysNone:
@@ -306,3 +324,62 @@ class TestNoneReplyStaysNone:
         metadata = recorder.calls[0]["metadata"]
         assert metadata["response_preview"] is None
         assert metadata["prompt_tokens"] is None
+
+
+class _Answer(BaseModel):
+    text: str
+    confidence: float
+
+
+class TestStructuredAndTypedPreviews:
+    """Structured/typed previews must serialize the whole result."""
+
+    def test_typed_model_with_text_field_records_full_json(self):
+        answer = _Answer(text="short", confidence=0.9)
+        wrapper, recorder = _wrapper_with(_StubLLM(typed=answer))
+
+        assert wrapper.generate_typed("question", schema=_Answer) is answer
+        preview = recorder.calls[0]["metadata"]["response_preview"]
+        assert preview == answer.model_dump_json()
+
+    def test_structured_dict_records_json(self):
+        wrapper, recorder = _wrapper_with(_StubLLM(structured={"answer": 42}))
+
+        wrapper.generate_structured("question")
+
+        preview = recorder.calls[0]["metadata"]["response_preview"]
+        assert preview == '{"answer": 42}'
+
+    def test_long_structured_preview_is_truncated(self):
+        wrapper, recorder = _wrapper_with(
+            _StubLLM(structured={"items": list(range(500))})
+        )
+
+        wrapper.generate_structured("question")
+
+        assert len(recorder.calls[0]["metadata"]["response_preview"]) == 200
+
+    def test_none_result_records_none(self):
+        wrapper, recorder = _wrapper_with(_StubLLM(structured=None))
+
+        assert wrapper.generate_structured("question") is None
+        assert recorder.calls[0]["metadata"]["response_preview"] is None
+
+
+def test_litellm_wrapper_reads_cost_from_response_text(monkeypatch):
+    monkeypatch.setattr("semantica.llms.litellm.LITELLM_AVAILABLE", True)
+    wrapper = LiteLLMWithProvenance(provenance=False, model="openai/gpt-4o")
+    recorder = _RecordingProvenanceManager()
+    wrapper.provenance = True
+    wrapper._prov_manager = recorder
+    wrapper._llm = _StubLLM(
+        response=ResponseText(
+            "answer",
+            usage=SimpleNamespace(prompt_tokens=3, completion_tokens=4),
+            cost=0.007,
+        )
+    )
+
+    wrapper.generate("question")
+
+    assert recorder.calls[0]["metadata"]["total_cost"] == 0.007
