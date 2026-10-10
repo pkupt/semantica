@@ -146,3 +146,57 @@ def match_rule(
         results.append((instantiated_conclusion, matched_facts, bindings))
 
     return results
+
+
+_BARE_VARIABLE_RE = re.compile(r"^[A-Z]$")
+_PREDICATE_CALL_RE = re.compile(r"^(\s*)([A-Za-z_]\w*)\s*\((.*)\)(\s*)$", re.DOTALL)
+
+
+def normalize_bare_variables(text: str) -> str:
+    """Rewrite a bare single-uppercase-letter argument to the explicit ``?X`` form.
+
+    ``docs/guides/reasoning.md`` documents a rule variable as "single uppercase
+    letters or multi-character uppercase words" and shows rules such as
+    ``IF ThreatActor(X) AND Exploits(X, Y) THEN HighRiskActor(X)``. The engine
+    only ever binds a variable that carries a leading ``?``, so those rules
+    matched nothing and returned an empty result with no error at all (#1790).
+
+    Normalising the rule text before it is stored restores the documented
+    behaviour without touching the matcher: once the argument reads ``?X``, the
+    existing ``?var`` machinery binds it as usual.
+
+    Only a *single* uppercase letter is rewritten. Multi-character names such
+    as ``Flu`` or ``Metformin`` are left alone, because the engine has always
+    treated them as constants -- ``IF Disease(Flu) THEN Symptom(Fever)`` must
+    keep matching only the literal fact ``Disease(Flu)``, and existing rules
+    and tests rely on that.
+
+    A zero-argument predicate (``IF A THEN B``), an argument that already
+    carries ``?``, and anything that is not a single ``predicate(...)`` call are
+    returned unchanged.
+    """
+    if not isinstance(text, str):
+        return text
+
+    match = _PREDICATE_CALL_RE.match(text)
+    if not match:
+        return text
+
+    lead, predicate, arguments, trail = match.groups()
+    if "(" in arguments or ")" in arguments:
+        # Nested terms: not a plain argument list, leave the text as written.
+        return text
+
+    rewritten = []
+    for argument in arguments.split(","):
+        token = argument.strip()
+        if _BARE_VARIABLE_RE.match(token):
+            start = argument.index(token)
+            rewritten.append(
+                f"{argument[:start]}?{token}{argument[start + len(token):]}"
+            )
+        else:
+            # Constants (multi-character names, quoted values, ...) keep their
+            # original spelling and spacing -- only the variable form changes.
+            rewritten.append(argument)
+    return f"{lead}{predicate}({','.join(rewritten)}){trail}"

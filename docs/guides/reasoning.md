@@ -119,7 +119,7 @@ Forward chaining starts from ground facts and applies every matching rule until 
 
 ```python
 # String-format rules are parsed automatically
-# Variables are single uppercase letters or multi-character uppercase words
+# A single uppercase letter (X) is a variable; the explicit ?x form works too
 reasoner.add_rule(
     "IF ThreatActor(X) AND Exploits(X, Y) AND CriticalVuln(Y) THEN HighRiskActor(X)"
 )
