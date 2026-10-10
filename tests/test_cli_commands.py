@@ -1071,6 +1071,48 @@ class TestReason:
         assert "reason query" in normalized
         assert "Traceback" not in result.output
 
+    def test_query_calls_execute_query_and_returns_bindings(self, runner, monkeypatch):
+        """`reason query` used to call SPARQLReasoner.query(), which does not
+        exist, so every input died with
+        ``AttributeError: 'SPARQLReasoner' object has no attribute 'query'``
+        (issue #1797). It must call execute_query() and surface the bindings
+        it returns."""
+        pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
+        captured = {}
+
+        class _FakeTripletStore:
+            def execute_query(self, query, **options):
+                captured["query"] = query
+                return [{"s": "http://example.org/Alice"}]
+
+        monkeypatch.setattr(
+            cli_module, "_get_triplet_store", lambda ctx: _FakeTripletStore())
+
+        result = runner.invoke(
+            cli_module.main,
+            ["--json", "reason", "query", "SELECT ?s WHERE { ?s ?p ?o }"],
+        )
+        _ok(result)
+        data = json.loads(result.output.strip())
+        assert data["bindings"] == [{"s": "http://example.org/Alice"}]
+        assert data["variables"] == ["s"]
+        assert captured["query"] == "SELECT ?s WHERE { ?s ?p ?o }"
+        assert "has no attribute" not in result.output
+
+    def test_query_without_triplet_store_fails_cleanly(self, runner):
+        """With no triplet store configured, execute_query() refuses loudly
+        (issue #1083). The command must report that, not crash with the
+        AttributeError from #1797."""
+        result = runner.invoke(
+            cli_module.main,
+            ["reason", "query", "SELECT ?s WHERE { ?s ?p ?o }"],
+        )
+        assert result.exit_code != 0
+        normalized = _flatten(result.output)
+        assert "triplet store" in normalized
+        assert "has no attribute" not in normalized
+        assert "Traceback" not in result.output
+
     def test_run_reasoning_local_json_flag_suppresses_spinner(self, runner, monkeypatch):
         """`reason run --json` (the command's own flag, not the global one)
         must not enter the Rich status spinner. console.status() writes to
