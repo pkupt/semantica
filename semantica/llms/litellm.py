@@ -180,17 +180,20 @@ class LiteLLM:
                 "hidden_params": hidden_params,
             }
 
+            def _wrap(content):
+                # Tool-call, refusal and content-filter replies carry no text.
+                return None if content is None else ResponseText(content, **meta)
+
             # Extract text from response
             if hasattr(response, 'choices') and len(response.choices) > 0:
-                return ResponseText(response.choices[0].message.content, **meta)
+                return _wrap(response.choices[0].message.content)
             elif isinstance(response, dict):
                 if 'choices' in response and len(response['choices']) > 0:
-                    choice = response['choices'][0]
-                    return ResponseText(choice['message']['content'], **meta)
+                    return _wrap(response['choices'][0]['message']['content'])
                 elif 'content' in response:
-                    return ResponseText(response['content'], **meta)
+                    return _wrap(response['content'])
             elif isinstance(response, str):
-                return ResponseText(response, **meta)
+                return _wrap(response)
             
             raise ProcessingError(f"Unexpected response format from LiteLLM: {type(response)}")
             

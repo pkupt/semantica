@@ -7,7 +7,8 @@ This module provides provenance tracking for all LLM operations:
 - HuggingFace LLM
 - LiteLLM
 
-Tracks: model name, tokens (prompt/completion), cost, latency, prompts, responses
+Tracks: model name, tokens (prompt/completion), latency, prompts, responses, and
+cost where the provider reports it (LiteLLM; OpenAI and Groq do not)
 
 All classes wrap the original LLM providers and add optional provenance tracking
 without modifying existing functionality.
@@ -25,7 +26,7 @@ Usage:
     # Provenance automatically tracks:
     # - Model used
     # - Token counts
-    # - API costs
+    # - API costs (LiteLLM only; OpenAI and Groq do not report cost)
     # - Latency
     # - Prompt and response previews
 
@@ -102,14 +103,19 @@ class LLMProvenanceMixin:
             **metadata: Additional metadata (tokens, cost, latency, etc.)
         """
         if self.provenance and self._prov_manager:
-            # Extract response text
+            # Extract response text; a reply with no text stays None rather
+            # than being recorded as the string "None".
             response_text = response
-            if hasattr(response, 'text'):
-                response_text = response.text
-            elif hasattr(response, 'content'):
-                response_text = response.content
-            elif not isinstance(response, str):
-                response_text = str(response)
+            if response is None:
+                response_preview = None
+            else:
+                if hasattr(response, 'text'):
+                    response_text = response.text
+                elif hasattr(response, 'content'):
+                    response_text = response.content
+                elif not isinstance(response, str):
+                    response_text = str(response)
+                response_preview = str(response_text)[:200]
 
             # Typed Activity timing (issue #825, Part B Tier 1): popped out so
             # it populates real fields, not the opaque metadata blob.
@@ -129,11 +135,7 @@ class LLMProvenanceMixin:
                 metadata={
                     "model": getattr(self, 'model', 'unknown'),
                     "prompt_preview": prompt[:200] if len(prompt) > 200 else prompt,
-                    "response_preview": (
-                        response_text[:200]
-                        if len(str(response_text)) > 200
-                        else str(response_text)
-                    ),
+                    "response_preview": response_preview,
                     **metadata
                 }
             )
@@ -189,7 +191,7 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
     Example:
         >>> llm = GroqLLMWithProvenance(provenance=True, model="llama-3.1-70b")
         >>> response = llm.generate("Explain quantum computing")
-        >>> # API call is tracked with model, tokens, cost, latency
+        >>> # API call is tracked with model, tokens, latency (Groq reports no cost)
     """
 
     def __init__(

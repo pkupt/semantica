@@ -160,9 +160,6 @@ class TestResponseText:
         assert text.cost is None
         assert text._hidden_params == {}
 
-    def test_none_text_becomes_empty_string(self):
-        assert ResponseText(None) == ""
-
     def test_carries_usage_cost_and_hidden_params(self):
         usage = SimpleNamespace(prompt_tokens=1, completion_tokens=2)
         text = ResponseText(
@@ -212,14 +209,12 @@ class _FakeClient:
         self.chat = _FakeChat(response)
 
 
-def _chat_response(content, cost=None):
-    response = SimpleNamespace(
+def _chat_response(content):
+    # OpenAI and Groq responses report usage but no cost.
+    return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
     )
-    if cost is not None:
-        response.cost = cost
-    return response
 
 
 class TestProvidersCarryUsageAndCost:
@@ -227,7 +222,7 @@ class TestProvidersCarryUsageAndCost:
 
     def test_openai_provider_returns_response_text(self):
         provider = OpenAIProvider(api_key="test-key")
-        provider.client = _FakeClient(_chat_response("hello", cost=0.002))
+        provider.client = _FakeClient(_chat_response("hello"))
 
         result = provider.generate("question")
 
@@ -235,7 +230,6 @@ class TestProvidersCarryUsageAndCost:
         assert result == "hello"
         assert result.usage is not None
         assert result.usage.prompt_tokens == 10
-        assert result.cost == 0.002
 
     def test_groq_provider_returns_response_text(self):
         provider = GroqProvider(api_key="test-key")
@@ -278,3 +272,37 @@ class TestProvidersCarryUsageAndCost:
         assert result == "answer"
         assert result.usage is not None
         assert result.cost == 0.007
+
+
+class TestNoneReplyStaysNone:
+    """A reply with no text (tool call, refusal, content filter) stays ``None``."""
+
+    @pytest.mark.parametrize("provider_cls", [OpenAIProvider, GroqProvider])
+    def test_none_reply_stays_none(self, provider_cls):
+        provider = provider_cls(api_key="test-key")
+        provider.client = _FakeClient(_chat_response(None))
+
+        assert provider.generate("question") is None
+
+    def test_litellm_none_reply_stays_none(self, monkeypatch):
+        import semantica.llms.litellm as litellm_module
+
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
+            usage=None,
+            _hidden_params={},
+        )
+        monkeypatch.setattr(litellm_module, "LITELLM_AVAILABLE", True)
+        monkeypatch.setattr(litellm_module, "completion", lambda **kwargs: response)
+
+        llm = litellm_module.LiteLLM(model="openai/gpt-4o")
+
+        assert llm.generate("question") is None
+
+    def test_wrapper_records_none_reply_without_stringifying(self):
+        wrapper, recorder = _wrapper_with(_StubLLM(response=None))
+
+        assert wrapper.generate("question") is None
+        metadata = recorder.calls[0]["metadata"]
+        assert metadata["response_preview"] is None
+        assert metadata["prompt_tokens"] is None
