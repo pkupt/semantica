@@ -167,9 +167,8 @@ jobs:
       # against a developer's.) The loop below deselects only the entries the
       # hook must not touch: the `# windows-only` ones, and only on Windows. The
       # file is the record of the gap: fixing a defect means deleting its line.
-      # It is LF-only — the
-      # loop feeds each line to --deselect verbatim, so a stray CR would make
-      # every node id miss.
+      # It is kept LF-only (.gitattributes); the loop below trims whitespace
+      # around each id, including a stray CR.
       - name: Run the full test suite
         timeout-minutes: 20
         run: |

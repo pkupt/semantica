@@ -11,17 +11,17 @@ The list only holds against the pinned ``requirements-ci.txt`` tree it was
 measured on. A developer machine has a different environment, so entries here
 can pass there, and a strict marker would turn each of those passes into a
 failure of an ordinary local run. The marker is therefore strict only when
-``CI`` is set (which GitHub Actions sets for every job) and non-strict
-everywhere else: locally a listed entry still runs and is still xfailed, but a
+``CI`` is set to a true value (``1``/``true``/``yes``; GitHub Actions sets
+``CI=true`` for every job) and non-strict everywhere else: locally a listed entry still runs and is still xfailed, but a
 pass is reported as XPASS without failing the run.
 
 The ``Run the full test suite`` step in ``.github/workflows/ci.yml`` deselects
 the entries it must — the ones marked ``# windows-only``, on Windows alone — so
 those never reach this hook. The hook leaves a ``# windows-only`` entry out on
-Linux, where it runs and passes: that is the only platform where the symlink
-rejection it covers is exercised at all. The ``# non-strict`` marker keeps an
-entry non-strict even in CI, for an entry that genuinely varies with run order;
-no entry uses it today, so every listed entry is strict in CI.
+Linux, where it runs and gates. (For the symlink-rejection test that is the only
+platform where the rejection is exercised at all.) The ``# non-strict`` marker keeps an
+entry non-strict even in CI, for an entry that genuinely varies with run order
+or timing; every other listed entry is strict in CI.
 
 The autouse fixture below isolates the process-wide ``semantic_extract`` config
 between tests: a double left there by one test otherwise makes every later
@@ -99,7 +99,7 @@ def pytest_collection_modifyitems(config, items):
     listed = _listed_ids()
     if not listed:
         return
-    in_ci = bool(os.environ.get("CI"))
+    in_ci = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes"}
     for item in items:
         entry = listed.get(item.nodeid)
         if entry is None:

@@ -11,15 +11,14 @@
 # Two markers change how an entry is treated, and both the step and the hook
 # read them so the two agree:
 #
-#   # windows-only   the step deselects the id on Windows alone, and the hook
-#                    leaves it out on Linux, so there it runs and passes —
-#                    the only platform where the symlink rejection it covers is
-#                    exercised at all.
+#   # windows-only   the id fails only in the Windows measurement. The step
+#                    deselects it on Windows alone, and the hook leaves it out
+#                    on Linux, so there it runs and gates.
 #   # non-strict     the hook marks the id xfail(strict=False), in CI as well as
 #                    locally: it keeps running, but a pass is reported as XPASS
 #                    without failing the run. For an entry that genuinely varies
-#                    with run order; none needs it today, so every entry below is
-#                    strict in CI.
+#                    with run order or timing (a thread race, for instance);
+#                    every other entry below is strict in CI.
 #
 # Provenance. Generated on a clean checkout of
 #
@@ -46,8 +45,8 @@
 # non-empty and its first character is not `#`, so keep comments flush left —
 # an indented comment would be read as a node id. A trailing `# windows-only` or
 # `# non-strict` marker is stripped before the id is used. The hook matches
-# the id the way pytest writes it relative to the repository root, so it takes
-# effect on a run started from the root.
+# the id the way pytest writes it, relative to the rootdir (the repository root
+# unless --rootdir or -c overrides it).
 #
 # Delete a line to re-enable a test. Fixing the defect behind it is what should
 # drive that, not convenience.
@@ -139,6 +138,7 @@ tests/vector_store/test_faiss_index.py::test_builder_trains_pq_index
 # `expected call not found`: the call the Weaviate test records no longer
 # matches what the store issues. `assert 2 == 5`: the Jena empty-graph test
 # counts operations that all complete only once every concurrent writer has
-# landed.
+# landed. That one is a thread race and can pass when the writers happen to
+# serialize, so it is `# non-strict`.
 tests/vector_store/test_backend_metadata_filtering.py::TestBackendMetadataFiltering::test_weaviate_store_filter_by_metadata_native_filter
-tests/triplet_store/test_jena_store_empty_graph.py::TestJenaStoreEmptyGraph::test_empty_graph_with_concurrent_operations
+tests/triplet_store/test_jena_store_empty_graph.py::TestJenaStoreEmptyGraph::test_empty_graph_with_concurrent_operations  # non-strict
