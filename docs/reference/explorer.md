@@ -100,16 +100,18 @@ The `semantica-explorer` command accepts exactly four flags:
 | `--no-browser` |: | off | Skip auto-opening the browser tab |
 
 <Note>
-  There are no flags for authentication, CORS, or log level in the CLI. CORS allowed origins are configured via the `EXPLORER_CORS_ORIGINS` environment variable (comma-separated, default: `http://localhost:5173,http://127.0.0.1:5173`).
+  There are no flags for authentication, CORS, or log level in the CLI. Allowed origins for HTTP CORS and WebSocket handshakes (`/ws/graph-updates`) are configured via the `ALLOWED_ORIGINS` environment variable (comma-separated). `EXPLORER_CORS_ORIGINS` is also supported as a legacy alias.
+
+  When launching via `semantica-explorer` without explicit environment variables, the server automatically allows connections from `localhost` and `127.0.0.1` on the configured `--port` (default: `8000`), in addition to local frontend development origins (`http://localhost:5173,http://127.0.0.1:5173`).
 </Note>
 
 <Tip>
-  **CORS origins are configured via environment variable.** Set `EXPLORER_CORS_ORIGINS` to a comma-separated list of allowed origins before launching (e.g. `EXPLORER_CORS_ORIGINS="http://myapp.example.com"`).
+  **Origins are configured via environment variable.** To allow external or custom browser origins for both REST API CORS and real-time graph updates over WebSocket (`/ws/graph-updates`), set `ALLOWED_ORIGINS` (or `EXPLORER_CORS_ORIGINS`) to a comma-separated list of allowed origins before launching (e.g. `ALLOWED_ORIGINS="http://myapp.example.com"`). When explicitly set, only the specified origins are allowed.
 </Tip>
 
 ```bash
 # Full example
-EXPLORER_CORS_ORIGINS="http://myapp.example.com" \
+ALLOWED_ORIGINS="http://myapp.example.com" \
   semantica-explorer --graph my_graph.json --host 0.0.0.0 --port 8080 --no-browser
 ```
 

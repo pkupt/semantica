@@ -77,7 +77,19 @@ def main(argv=None):
         f"[cyan]{stats.get('edge_count', 0)}[/cyan] edges"
     )
 
-    app = create_app(session=session)
+    allowed_origins = None
+    if "ALLOWED_ORIGINS" not in os.environ and "EXPLORER_CORS_ORIGINS" not in os.environ:
+        default_origins = [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            f"http://localhost:{args.port}",
+            f"http://127.0.0.1:{args.port}",
+        ]
+        if args.host not in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "::"):
+            default_origins.append(f"http://{args.host}:{args.port}")
+        allowed_origins = list(dict.fromkeys(default_origins))
+
+    app = create_app(session=session, allowed_origins=allowed_origins)
 
     url = f"http://{args.host}:{args.port}"
 

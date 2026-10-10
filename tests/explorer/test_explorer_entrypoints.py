@@ -3,7 +3,8 @@ import pytest
 pytest.importorskip("fastapi")
 
 from fastapi import FastAPI  # noqa: E402
-from starlette.testclient import TestClient  # noqa: E402
+from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect  # noqa: E402
 
 from semantica.context.context_graph import ContextGraph  # noqa: E402
 from semantica.explorer.runtime import install_mutation_bridge  # noqa: E402
@@ -144,3 +145,76 @@ def test_legacy_server_mounts_editable_markdown_routes(monkeypatch):
     )
     assert saved.status_code == 200
     assert saved.json()["body"] == "Updated server content"
+
+
+def test_cli_main_configures_allowed_origins_for_custom_port(tmp_path, monkeypatch):
+    """Regression test for #1257: semantica-explorer --port 8020 includes port in allowed_origins."""
+    monkeypatch.setenv("SEMANTICA_ALLOW_ANONYMOUS", "true")
+    monkeypatch.delenv("SEMANTICA_API_KEY", raising=False)
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+    monkeypatch.delenv("EXPLORER_CORS_ORIGINS", raising=False)
+
+    graph_file = tmp_path / "test_graph.json"
+    graph_file.write_text('{"nodes": [], "edges": []}', encoding="utf-8")
+
+    from semantica.explorer import main
+    import uvicorn
+
+    captured_app = None
+    captured_kwargs = {}
+
+    def mock_run(app, **kwargs):
+        nonlocal captured_app, captured_kwargs
+        captured_app = app
+        captured_kwargs = kwargs
+
+    monkeypatch.setattr(uvicorn, "run", mock_run)
+
+    main(["--graph", str(graph_file), "--port", "8020", "--no-browser"])
+
+    assert captured_kwargs["port"] == 8020
+    assert "http://127.0.0.1:8020" in captured_app.state.explorer_settings["allowed_origins"]
+    assert "http://localhost:8020" in captured_app.state.explorer_settings["allowed_origins"]
+
+    with TestClient(captured_app) as client:
+        with client.websocket_connect(
+            "/ws/graph-updates", headers={"Origin": "http://127.0.0.1:8020"}
+        ) as ws:
+            ack = ws.receive_json()
+        assert ack["event"] == "connection_ack"
+
+        # Hostile origin still rejected
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            with client.websocket_connect(
+                "/ws/graph-updates", headers={"Origin": "https://evil.example"}
+            ):
+                pass
+        assert excinfo.value.code == 4403
+
+
+def test_cli_main_preserves_explicit_allowed_origins(tmp_path, monkeypatch):
+    """Ensure explicit ALLOWED_ORIGINS is not overridden when --port is specified."""
+    monkeypatch.setenv("SEMANTICA_ALLOW_ANONYMOUS", "true")
+    monkeypatch.delenv("SEMANTICA_API_KEY", raising=False)
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://custom.example.com")
+    monkeypatch.delenv("EXPLORER_CORS_ORIGINS", raising=False)
+
+    graph_file = tmp_path / "test_graph.json"
+    graph_file.write_text('{"nodes": [], "edges": []}', encoding="utf-8")
+
+    from semantica.explorer import main
+    import uvicorn
+
+    captured_app = None
+
+    def mock_run(app, **kwargs):
+        nonlocal captured_app
+        captured_app = app
+
+    monkeypatch.setattr(uvicorn, "run", mock_run)
+
+    main(["--graph", str(graph_file), "--port", "8020", "--no-browser"])
+
+    assert captured_app.state.explorer_settings["allowed_origins"] == [
+        "https://custom.example.com"
+    ]
