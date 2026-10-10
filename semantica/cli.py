@@ -5255,13 +5255,29 @@ def backup_create(
             passphrase = kp.read_text(encoding="utf-8").strip()
             if not passphrase:
                 raise click.ClickException(f"Keyfile {keyfile} is empty; cannot derive encryption key.")
-        elif encrypt:
-            passphrase = click.prompt("Backup passphrase", hide_input=True,
-                                      confirmation_prompt=True)
         else:
             passphrase = None
 
         cfg = cli_ctx.config.to_dict()
+        sources = _collect_backup_sources(cfg, cli_ctx.config_path, include, strip_config)
+        # Fail before any prompt instead of writing an archive with no
+        # store data in it (#1820).
+        if include in ("graph", "vector", "triplet", "all") and not any(
+            arcname.startswith(("graph/", "vector/", "triplet/"))
+            for arcname, _ in sources
+        ):
+            stores = "graph, vector and triplet stores" if include == "all" else f"{include} store"
+            raise click.ClickException(
+                f"No store data to back up: found no local files for the {stores}. "
+                "backup create only copies file-based stores (a graph_db / vector_store / "
+                "triplet_store path that exists on disk); run `semantica backup info` "
+                "to see how to back up other backends."
+            )
+
+        if encrypt and passphrase is None:
+            passphrase = click.prompt("Backup passphrase", hide_input=True,
+                                      confirmation_prompt=True)
+
         if not strip_config and not encrypt and passphrase is None:
             if not quiet:
                 console.print(
@@ -5274,7 +5290,6 @@ def backup_create(
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         import tarfile, tempfile, shutil
-        sources = _collect_backup_sources(cfg, cli_ctx.config_path, include, strip_config)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             manifest: Dict[str, Any] = {

@@ -165,6 +165,10 @@ semantica-explorer --graph my_graph.json --no-browser
   `--host 0.0.0.0` makes Explorer reachable on every network interface. Since v0.6.5 the Explorer API requires `SEMANTICA_API_KEY` (sent as the `X-API-Key` header) and fails closed with `503` when unconfigured; unauthenticated access is only possible when `SEMANTICA_ALLOW_ANONYMOUS=true` is set explicitly. Only use this on a trusted private network.
 </Warning>
 
+<Tip>
+  **CORS and WebSocket Origins:** `semantica-explorer` automatically allows browser connections from `localhost` and `127.0.0.1` on the configured `--port` (and Vite dev port `5173`). To allow external browser origins or custom domains for both HTTP CORS and `/ws/graph-updates` WebSocket connections, set the `ALLOWED_ORIGINS` environment variable (e.g. `ALLOWED_ORIGINS="https://explorer.example.com"`). An origin not in the allowlist causes the WebSocket handshake to fail with HTTP 403; add the origin to `ALLOWED_ORIGINS` to resolve this for custom or external clients. `EXPLORER_CORS_ORIGINS` is also supported as a legacy alias.
+</Tip>
+
 
 ## Browser Access
 
