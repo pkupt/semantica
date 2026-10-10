@@ -71,6 +71,7 @@ Production Use Cases:
     - Legal: Case precedent analysis, decision consistency
 """
 
+import copy
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -446,8 +447,10 @@ class AgentContext:
         """
         # Auto-detect content type
         if isinstance(content, str):
-            # Single memory item
-            memory_metadata = metadata or {}
+            # Single memory item. Copy before enriching: assigning into the
+            # caller's dict would leak `conversation_id` / `user_id` back into
+            # the object they passed in (#1794).
+            memory_metadata = dict(metadata) if metadata else {}
             if conversation_id:
                 memory_metadata["conversation_id"] = conversation_id
             if user_id:
@@ -919,8 +922,13 @@ class AgentContext:
             )
             distance = by_node_id.get(result_id)
             if not distance:
-                if max_hops is not None or min_confidence_decay > 0.0:
-                    continue
+                # This result cannot be placed on the graph: either it carries
+                # no id or the anchor's neighbourhood does not reach it.
+                # Dropping it made every retrieval return [] as soon as
+                # anchor_node was passed together with max_hops or
+                # min_confidence_decay, even though matching records existed
+                # (#1794). Keep it unscored instead. max_hops still filters
+                # results whose hop distance is known and exceeds the limit.
                 enriched.append(result)
                 continue
 
@@ -951,6 +959,9 @@ class AgentContext:
     def _memory_to_dict(self, memory: Dict[str, Any]) -> Dict[str, Any]:
         """Convert memory result to dict."""
         return {
+            # Carry the memory id through: _apply_proximity_metadata() looks
+            # for it to place the result relative to anchor_node (#1794).
+            "id": memory.get("memory_id"),
             "content": memory.get("content", ""),
             "score": memory.get("score", 0.0),
             "source": "memory",
@@ -975,7 +986,10 @@ class AgentContext:
         memory_item = self._memory.get_memory(memory_id)
         if memory_item:
             return {
-                "id": memory_item.get("id"),
+                # AgentMemory.get_memory() returns the identifier under
+                # "memory_id"; reading "id" here always yielded None, so the
+                # record came back without its own key (#1794).
+                "id": memory_item.get("memory_id"),
                 "content": memory_item.get("content"),
                 "timestamp": memory_item.get("timestamp"),
                 "metadata": memory_item.get("metadata", {}),

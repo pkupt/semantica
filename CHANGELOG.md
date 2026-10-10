@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`AgentContext` reads shared state with its store, and one retrieval path returned an empty list** (fixes #1794)
+  - `store()` kept the caller's `metadata` / `entities` / `relationships` containers by reference, and `AgentContext.store()` wrote `conversation_id` / `user_id` straight into the dict it was handed. `get_memory()`, `retrieve()`, `_search_short_term()` and `_keyword_search()` handed the stored containers back as well. Mutating a dict the caller passed in, or mutating a returned result, therefore rewrote the stored record. All of these now copy.
+  - `AgentContext.get_memory()` read the identifier under `"id"` while `AgentMemory.get_memory()` returns it under `"memory_id"`, so every record came back with `"id": None`. It now returns the real id, and `_memory_to_dict()` carries the id through so results can be placed against `anchor_node`.
+  - `retrieve(..., anchor_node=..., max_hops=...)` discarded every result it could not place on the graph, so a store that plainly held a matching record returned `[]`. Unplaceable results are now kept and simply left distance-unscored; `max_hops` still filters results whose hop distance is known and exceeds the limit.
+  - New `tests/context/test_agent_context_retrieve_isolation.py`
+
 - **`semantica backup create` reported success for an archive with no store data** (fixes #1820) by @costajohnt
   - With no file-based `graph_db` / `vector_store` / `triplet_store` path in the config, `backup create` wrote a manifest with `"files": []` and exited 0. It now fails with an error that points to `semantica backup info`, before asking for a passphrase or confirmation and before writing anything.
 
