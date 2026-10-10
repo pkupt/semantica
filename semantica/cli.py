@@ -1480,25 +1480,6 @@ def _get_graph_store(cli_ctx: CLIContext) -> Any:
     return GraphStore(backend=backend, **graph_db)
 
 
-def _get_triplet_store(cli_ctx: CLIContext) -> Any:
-    """Return a TripletStore wired from the ``triplet_store`` config section.
-
-    Mirrors ``_get_graph_store`` for the SPARQL side. Returns ``None`` when
-    the section is absent or names no backend, so that
-    ``SPARQLReasoner.execute_query()`` raises its own actionable
-    ProcessingError (issue #1083) instead of the CLI inventing a store.
-    """
-    cfg = cli_ctx.config.to_dict().get("triplet_store")
-    if not isinstance(cfg, dict) or not cfg.get("backend"):
-        return None
-    from .triplet_store import TripletStore
-
-    options = dict(cfg)
-    backend = options.pop("backend")
-    endpoint = options.pop("endpoint", None) or options.pop("uri", None)
-    return TripletStore(backend=backend, endpoint=endpoint, **options)
-
-
 def _load_policy_rules(path: str) -> Dict[str, Any]:
     """Load a decision policy rules file as a mapping.
 
@@ -3318,23 +3299,24 @@ def reason_query(cli_ctx: CLIContext, query_str: str, with_inference: bool,
     def _action() -> None:
         try:
             from .reasoning import SPARQLReasoner
-            # execute_query() reads inference from the reasoner's own config,
-            # not from its options, so --with-inference has to reach the
-            # constructor. The method is execute_query(); the handler used to
-            # call a non-existent query() and crashed on every input (#1797).
+            # The method is execute_query(); the handler used to call a
+            # non-existent query() and crashed on every input (#1797). It reads
+            # inference from the reasoner's own config, not from its options,
+            # so --with-inference has to reach the constructor. It also refuses
+            # to run without a triplet store (#1083) rather than returning an
+            # empty result set — the honest answer while the CLI has no way to
+            # pass one in.
             reasoner = SPARQLReasoner(
                 config=cli_ctx.config.to_dict(),
-                triplet_store=_get_triplet_store(cli_ctx),
                 enable_inference=with_inference,
             )
             result = reasoner.execute_query(query_str)
         except ImportError as exc:
             raise click.ClickException(f"Reasoning module not available: {exc}") from exc
-        payload = {"bindings": result.bindings, "variables": result.variables}
         if _is_json(cli_ctx, local_json):
-            _jecho(payload)
+            _jecho(result if isinstance(result, (dict, list)) else {"result": str(result)})
         else:
-            _pprint(cli_ctx, payload)
+            _pprint(cli_ctx, result)
 
     _run_with_error_handling(_action)
 

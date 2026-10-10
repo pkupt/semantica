@@ -1071,33 +1071,38 @@ class TestReason:
         assert "reason query" in normalized
         assert "Traceback" not in result.output
 
-    def test_query_calls_execute_query_and_returns_bindings(self, runner, monkeypatch):
+    def test_query_calls_execute_query_not_query(self, runner, monkeypatch):
         """`reason query` used to call SPARQLReasoner.query(), which does not
         exist, so every input died with
         ``AttributeError: 'SPARQLReasoner' object has no attribute 'query'``
-        (issue #1797). It must call execute_query() and surface the bindings
-        it returns."""
+        (issue #1797). The handler must reach for execute_query() instead."""
         pytest.importorskip("numpy", reason="semantica.reasoning needs numpy")
-        captured = {}
+        import semantica.reasoning as reasoning_module
 
-        class _FakeTripletStore:
+        calls = []
+
+        class _FakeReasoner:
+            def __init__(self, **kwargs):
+                calls.append(("init", kwargs))
+
             def execute_query(self, query, **options):
-                captured["query"] = query
-                return [{"s": "http://example.org/Alice"}]
+                calls.append(("execute_query", query))
+                return {"bindings": [], "variables": []}
 
-        monkeypatch.setattr(
-            cli_module, "_get_triplet_store", lambda ctx: _FakeTripletStore())
+            def query(self, *args, **kwargs):  # pragma: no cover
+                # SPARQLReasoner has no query(); reaching this means the
+                # handler regressed to the bug in #1797.
+                raise AssertionError("reason query called query() (#1797)")
+
+        monkeypatch.setattr(reasoning_module, "SPARQLReasoner", _FakeReasoner)
 
         result = runner.invoke(
             cli_module.main,
-            ["--json", "reason", "query", "SELECT ?s WHERE { ?s ?p ?o }"],
+            ["reason", "query", "SELECT ?s WHERE { ?s ?p ?o }"],
         )
         _ok(result)
-        data = json.loads(result.output.strip())
-        assert data["bindings"] == [{"s": "http://example.org/Alice"}]
-        assert data["variables"] == ["s"]
-        assert captured["query"] == "SELECT ?s WHERE { ?s ?p ?o }"
-        assert "has no attribute" not in result.output
+        assert [name for name, _ in calls] == ["init", "execute_query"]
+        assert calls[1][1] == "SELECT ?s WHERE { ?s ?p ?o }"
 
     def test_query_without_triplet_store_fails_cleanly(self, runner):
         """With no triplet store configured, execute_query() refuses loudly
