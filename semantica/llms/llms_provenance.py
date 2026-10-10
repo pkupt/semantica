@@ -279,7 +279,8 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
                 completion_tokens=completion_tokens,
                 total_tokens=(
                     (prompt_tokens + completion_tokens)
-                    if (prompt_tokens and completion_tokens)
+                    if prompt_tokens is not None
+                    and completion_tokens is not None
                     else None
                 ),
                 total_cost=total_cost,
@@ -316,6 +317,10 @@ class GroqLLMWithProvenance(LLMProvenanceMixin):
 
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
+        if name == "_llm":
+            # _llm is unset (failed __init__, copy.copy, unpickling); looking it
+            # up through getattr(self._llm, ...) would recurse forever.
+            raise AttributeError(name)
         return getattr(self._llm, name)
 
 
@@ -386,7 +391,8 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
                 completion_tokens=completion_tokens,
                 total_tokens=(
                     (prompt_tokens + completion_tokens)
-                    if (prompt_tokens and completion_tokens)
+                    if prompt_tokens is not None
+                    and completion_tokens is not None
                     else None
                 ),
                 total_cost=total_cost,
@@ -422,6 +428,10 @@ class OpenAILLMWithProvenance(LLMProvenanceMixin):
 
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
+        if name == "_llm":
+            # _llm is unset (failed __init__, copy.copy, unpickling); looking it
+            # up through getattr(self._llm, ...) would recurse forever.
+            raise AttributeError(name)
         return getattr(self._llm, name)
 
 
@@ -508,6 +518,10 @@ class HuggingFaceLLMWithProvenance(LLMProvenanceMixin):
 
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
+        if name == "_llm":
+            # _llm is unset (failed __init__, copy.copy, unpickling); looking it
+            # up through getattr(self._llm, ...) would recurse forever.
+            raise AttributeError(name)
         return getattr(self._llm, name)
 
 
@@ -608,6 +622,10 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
 
     def __getattr__(self, name):
         """Delegate other methods to wrapped LLM."""
+        if name == "_llm":
+            # _llm is unset (failed __init__, copy.copy, unpickling); looking it
+            # up through getattr(self._llm, ...) would recurse forever.
+            raise AttributeError(name)
         return getattr(self._llm, name)
 
 

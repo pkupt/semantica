@@ -138,6 +138,19 @@ class TestUsageAndCostPropagate:
         assert metadata["total_tokens"] == 15
         assert metadata["total_cost"] == 0.002
 
+    def test_zero_completion_tokens_still_sums(self):
+        response = ResponseText(
+            "",
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=0),
+        )
+        wrapper, recorder = _wrapper_with(_StubLLM(response=response))
+
+        wrapper.generate("question")
+
+        metadata = recorder.calls[0]["metadata"]
+        assert metadata["completion_tokens"] == 0
+        assert metadata["total_tokens"] == 10
+
     def test_generate_without_usage_metadata_stays_none(self):
         wrapper, recorder = _wrapper_with(_StubLLM(response=ResponseText("plain")))
 
@@ -175,6 +188,7 @@ class TestResponseText:
     [
         "GroqLLMWithProvenance",
         "OpenAILLMWithProvenance",
+        "HuggingFaceLLMWithProvenance",
         "LiteLLMWithProvenance",
     ],
 )
@@ -185,6 +199,37 @@ def test_all_wrappers_expose_structured_and_typed(wrapper_name):
     wrapper_cls = getattr(module, wrapper_name)
     assert "generate_structured" in wrapper_cls.__dict__
     assert "generate_typed" in wrapper_cls.__dict__
+
+
+@pytest.mark.parametrize(
+    "wrapper_name",
+    [
+        "GroqLLMWithProvenance",
+        "OpenAILLMWithProvenance",
+        "HuggingFaceLLMWithProvenance",
+        "LiteLLMWithProvenance",
+    ],
+)
+def test_unset_llm_raises_attribute_error_not_recursion(wrapper_name):
+    """A wrapper whose ``_llm`` was never set must not recurse in __getattr__."""
+    import semantica.llms.llms_provenance as module
+
+    wrapper = object.__new__(getattr(module, wrapper_name))
+
+    with pytest.raises(AttributeError):
+        wrapper.some_missing_attribute
+
+
+def test_copy_of_wrapper_does_not_recurse():
+    """copy.copy() probes attributes before _llm exists on the new object."""
+    import copy
+
+    wrapper = GroqLLMWithProvenance(provenance=False)
+    wrapper._llm = _StubLLM(response="ok")
+
+    clone = copy.copy(wrapper)
+
+    assert clone.generate("q") == "ok"
 
 
 class _FakeCompletions:
