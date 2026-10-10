@@ -400,10 +400,11 @@ class TestPureMatchingModule(unittest.TestCase):
 class TestBareVariableNormalisation(unittest.TestCase):
     """#1790: a bare single uppercase letter is a rule variable, as documented.
 
-    ``docs/guides/reasoning.md`` documents variables as "single uppercase
-    letters" and its rules use the bare form (``ThreatActor(X)``). The engine
+    ``docs/guides/reasoning.md`` documents a variable as a single uppercase
+    letter and its rules use the bare form (``ThreatActor(X)``). The engine
     used to bind only the explicit ``?x`` form, so those rules matched nothing
-    and returned an empty result with no error at all.
+    and returned an empty result with no error at all. A multi-character name
+    stays a constant and has to be written as ``?name`` when it is a variable.
     """
 
     def test_bare_single_letter_variable_is_bound(self):
@@ -508,6 +509,60 @@ class TestBareVariableNormalisation(unittest.TestCase):
         self.assertEqual(normalize_bare_variables("Vuln(CVE-2025-3400)"), "Vuln(CVE-2025-3400)")
         self.assertEqual(normalize_bare_variables("A"), "A")
         self.assertEqual(normalize_bare_variables("Person(?x)"), "Person(?x)")
+
+    def test_normalize_leaves_text_without_a_variable_untouched(self):
+        # Rebuilding the term unconditionally dropped the whitespace between a
+        # predicate and its parenthesis, so "Person (John)" came out as
+        # "Person(John)" and stopped matching the fact of the same name.
+        self.assertEqual(normalize_bare_variables("Person (John)"), "Person (John)")
+        self.assertEqual(normalize_bare_variables("Eligible(John)"), "Eligible(John)")
+
+    def test_rule_without_a_variable_still_matches_its_spaced_fact(self):
+        self.assertEqual(
+            Reasoner().infer_facts(
+                ["Person (John)"], ["IF Person (John) THEN Eligible(John)"]
+            ),
+            ["Eligible(John)"],
+        )
+
+    def test_hyphenated_predicate_can_bind_a_bare_variable(self):
+        # The predicate charset mirrors the engine's own fact parser, so a name
+        # such as "works-at" is rewritten like any other predicate.
+        self.assertEqual(
+            Reasoner().infer_facts(
+                ["works-at(John)"], ["IF works-at(X) THEN Staff(X)"]
+            ),
+            ["Staff(John)"],
+        )
+
+    def test_nested_term_arguments_are_handled(self):
+        self.assertEqual(
+            Reasoner().infer_facts(
+                ["Employed(John, Department(Sales))"],
+                ["IF Employed(X, Department(Sales)) THEN Mgr(X)"],
+            ),
+            ["Mgr(John)"],
+        )
+
+    def test_multi_character_variable_requires_the_explicit_form(self):
+        facts = ["Exploits(APT29, CVE-2025-3400)", "CriticalVuln(CVE-2025-3400)"]
+        # A multi-character name is a constant, so the bare rule matches
+        # nothing ...
+        self.assertEqual(
+            Reasoner().infer_facts(
+                facts,
+                ["IF Exploits(X, CVE) AND CriticalVuln(CVE) THEN HighRiskActor(X)"],
+            ),
+            [],
+        )
+        # ... and the documented ?name form is what binds it.
+        self.assertEqual(
+            Reasoner().infer_facts(
+                facts,
+                ["IF Exploits(X, ?CVE) AND CriticalVuln(?CVE) THEN HighRiskActor(X)"],
+            ),
+            ["HighRiskActor(APT29)"],
+        )
 
 
 def test_match_rule_keeps_pattern_override(monkeypatch):
