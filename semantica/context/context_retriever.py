@@ -247,7 +247,10 @@ class ContextRetriever:
                 is graded on evidence quality (see the "trust_tier" key in
                 RetrievedContext.metadata) and only results meeting the
                 minimum are returned. Graph facts without readable signals
-                grade to quarantine. In local mode, results that carry no
+                grade to quarantine. Without a ``provenance_manager`` (or a
+                ``corroboration_count`` in metadata) facts have no
+                corroboration signal and grade bronze at best, so a silver or
+                gold threshold needs one. In local mode, results that carry no
                 tier signal (vector chunks with neither a graph node id nor a
                 confidence reading) are excluded too; global, drift and
                 hybrid keep such unscored summaries so a threshold cannot
@@ -440,7 +443,9 @@ class ContextRetriever:
 
         Corroboration count comes from the provenance manager when one is
         wired and the context carries a node id; otherwise it falls back to a
-        ``corroboration_count`` already present in metadata. Confidence comes
+        ``corroboration_count`` already present in metadata. The provenance
+        count is the number of distinct ``source`` values, since a lineage
+        trace can list the same document more than once. Confidence comes
         from ``metadata["confidence"]``. Either signal may be None when the
         retrieval source does not expose it (e.g. a vector chunk with no graph
         provenance).
@@ -458,8 +463,12 @@ class ContextRetriever:
         corroboration: Optional[int] = None
         if self.provenance_manager is not None and node_id:
             try:
-                sources = self.provenance_manager.get_all_sources(node_id)
-                corroboration = len(sources) if sources is not None else 0
+                sources = self.provenance_manager.get_all_sources(node_id) or []
+                corroboration = len({
+                    s.get("source")
+                    for s in sources
+                    if isinstance(s, dict) and s.get("source")
+                })
             except Exception:
                 corroboration = None
         if corroboration is None:
@@ -473,12 +482,14 @@ class ContextRetriever:
         """
         Grade each result on evidence quality and record it in metadata.
 
-        Graph facts (results carrying a ``node_id``) always receive a tier:
-        when neither corroboration nor confidence is readable, the calculator
-        degrades them to quarantine instead of leaving the grade blank, so a
-        missing signal is never treated as if it had been measured. Other
-        results (for example vector chunks with neither a graph node id nor a
-        confidence reading) are left unscored. An existing ``trust_tier`` is
+        Graph facts (results carrying a ``node_id``, and edge facts carrying
+        ``source``, ``relation`` and ``target`` such as DRIFT's verified local
+        facts) always receive a tier: when neither corroboration nor
+        confidence is readable, the calculator degrades them to quarantine
+        instead of leaving the grade blank, so a missing signal is never
+        treated as if it had been measured. Other results (for example vector
+        chunks or community summaries with no confidence reading) are left
+        unscored. An existing ``trust_tier`` is
         recomputed from current signals on every pass, so a grade cannot
         outlive the evidence it was derived from.
 
@@ -492,7 +503,10 @@ class ContextRetriever:
         """
         for context in results:
             corroboration, confidence = self._tier_signals_for(context)
-            is_graph_fact = bool(context.metadata.get("node_id"))
+            meta = context.metadata
+            is_graph_fact = bool(meta.get("node_id")) or bool(
+                meta.get("source") and meta.get("relation") and meta.get("target")
+            )
             if not is_graph_fact and corroboration is None and confidence is None:
                 continue
             try:
@@ -584,10 +598,10 @@ class ContextRetriever:
             min_relevance_score: Minimum relevance score
             as_contexts: If True, return List[RetrievedContext];
                 if False, return GlobalSearchResult
-            min_trust_tier: Optional trust threshold. Global summaries carry no
-                per-fact evidence signal, so they are never graded and are
-                always kept when a threshold is set; only contexts that were
-                explicitly tiered by a caller are filtered out.
+            min_trust_tier: Optional trust threshold. Summaries with no
+                evidence signal stay unscored and are always kept when a
+                threshold is set; contexts that do carry a signal are graded
+                and filtered like any other result.
             **options: Additional options passed to GlobalGraphRetriever
 
         Returns:
@@ -634,9 +648,9 @@ class ContextRetriever:
             ]
             self._attach_trust_tiers(contexts)
             if min_trust_tier is not None:
-                # Global summaries are structurally ungradeable (no per-fact
-                # evidence signal), so dropping them for "missing tier" would
-                # empty the result. Keep them; only caller-tiered items filter.
+                # Summaries with no evidence signal stay unscored; dropping
+                # them for "missing tier" would empty the result. Keep them;
+                # only graded items are filtered.
                 contexts = self.filter_by_tier(
                     contexts, min_trust_tier, include_unscored=True
                 )
@@ -663,10 +677,11 @@ class ContextRetriever:
             min_relevance_score: Minimum relevance score
             as_contexts: If True, return List[RetrievedContext];
                 if False, return DriftSearchResult
-            min_trust_tier: Optional trust threshold. DRIFT results blend
-                community-report summaries that carry no per-fact evidence
-                signal, so those summaries are always kept when a threshold is
-                set; only contexts explicitly tiered by a caller are filtered.
+            min_trust_tier: Optional trust threshold. The DRIFT answer is a
+                summary with no evidence signal and is always kept when a
+                threshold is set. Verified local facts are graph edges, so
+                they are always graded (quarantine without signals) and
+                filtered.
             **options: Additional options passed to DriftSearchEngine
 
         Returns:
@@ -715,9 +730,8 @@ class ContextRetriever:
             ]
             self._attach_trust_tiers(contexts)
             if min_trust_tier is not None:
-                # DRIFT blends community-report summaries that are structurally
-                # ungradeable; dropping them for "missing tier" would empty the
-                # result. Keep them; only caller-tiered items filter.
+                # The DRIFT answer is an unscored summary and is kept; the
+                # verified local facts are graded as graph facts and filtered.
                 contexts = self.filter_by_tier(
                     contexts, min_trust_tier, include_unscored=True
                 )

@@ -42,7 +42,7 @@ def test_tier_signals_from_corroboration_count_metadata():
 
 def test_tier_signals_uses_provenance_manager():
     pm = MagicMock()
-    pm.get_all_sources.return_value = [{"src": "a"}, {"src": "b"}]
+    pm.get_all_sources.return_value = [{"source": "a"}, {"source": "b"}]
     retriever = ContextRetriever(provenance_manager=pm)
     corr, conf = retriever._tier_signals_for(
         _ctx("f", node_id="ent_1", confidence=0.9)
@@ -301,3 +301,71 @@ def test_retrieve_hybrid_keeps_global_summaries_with_min_trust_tier():
     contents = {c.content for c in results}
     assert "local gold" in contents
     assert "global summary" in contents
+
+
+# ----------------------------------------------------------------------
+# Corroboration counts distinct sources, not lineage entries
+# ----------------------------------------------------------------------
+
+
+def test_tier_signals_counts_distinct_sources():
+    pm = MagicMock()
+    pm.get_all_sources.return_value = [
+        {"source": "doc_1"},
+        {"source": "doc_1"},
+        {"source": None},
+    ]
+    retriever = ContextRetriever(provenance_manager=pm)
+    corr, _ = retriever._tier_signals_for(_ctx("f", node_id="ent_1"))
+    assert corr == 1
+
+
+def test_single_document_lineage_is_not_gold():
+    from semantica.provenance.manager import ProvenanceManager
+
+    pm = ProvenanceManager()
+    pm.track_entity("chunk_1", source="doc_1")
+    pm.track_entity("ent_1", source="doc_1", parent_entity_id="chunk_1")
+    retriever = ContextRetriever(provenance_manager=pm)
+    ctx = _ctx("f", node_id="ent_1", confidence=0.9)
+    retriever._attach_trust_tiers([ctx])
+    assert ctx.metadata["trust_tier"] == TrustTier.SILVER.value
+
+
+# ----------------------------------------------------------------------
+# DRIFT local facts are graph edges and are graded like graph facts
+# ----------------------------------------------------------------------
+
+
+def _drift_result():
+    from semantica.context.drift_search import DriftSearchResult
+
+    return DriftSearchResult(
+        query="q",
+        answer="drift answer",
+        global_reports_used=["c1"],
+        verified_local_contexts=[
+            {"source": "A", "target": "B", "relation": "R",
+             "attributes": {"confidence": 0.95}},
+            {"source": "C", "target": "D", "relation": "R", "attributes": {}},
+        ],
+    )
+
+
+def test_drift_local_facts_are_always_graded():
+    retriever = ContextRetriever()
+    contexts = _drift_result().to_retrieved_contexts()
+    retriever._attach_trust_tiers(contexts)
+    tiers = [c.metadata.get("trust_tier") for c in contexts]
+    assert tiers == [None, TrustTier.BRONZE.value, TrustTier.QUARANTINE.value]
+
+
+def test_drift_threshold_does_not_keep_signal_less_facts():
+    retriever = ContextRetriever()
+    with patch("semantica.context.drift_search.DriftSearchEngine") as DSE:
+        DSE.return_value.search.return_value = _drift_result()
+        results = retriever.retrieve_drift(
+            "q", as_contexts=True, max_results=10,
+            min_trust_tier=TrustTier.BRONZE,
+        )
+    assert [c.content for c in results] == ["drift answer", "(A) -[R]-> (B)"]
