@@ -901,7 +901,7 @@ facts_in_window = tq.query_time_range(
 )
 
 # Normalize natural language temporal expressions - returns a (start, end) range
-norm = TemporalNormalizer()
+norm = TemporalNormalizer(reference_date=datetime(2026, 1, 1))
 start, end = norm.normalize("last quarter")
 ```
 
