@@ -578,8 +578,14 @@ class LiteLLMWithProvenance(LLMProvenanceMixin):
             total_cost = None
 
             if hasattr(response, 'usage'):
-                prompt_tokens = getattr(response.usage, 'prompt_tokens', None)
-                completion_tokens = getattr(response.usage, 'completion_tokens', None)
+                if isinstance(response.usage, dict):
+                    prompt_tokens = response.usage.get("prompt_tokens")
+                    completion_tokens = response.usage.get("completion_tokens")
+                else:
+                    prompt_tokens = getattr(response.usage, "prompt_tokens", None)
+                    completion_tokens = getattr(
+                        response.usage, "completion_tokens", None
+                    )
 
             if hasattr(response, 'cost'):
                 total_cost = response.cost

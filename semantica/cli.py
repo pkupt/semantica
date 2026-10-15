@@ -5267,9 +5267,15 @@ def _collect_backup_sources(
     config_path: Optional[str],
     include: str,
     strip_config: bool,
-) -> List[Tuple[str, Path]]:
-    """Return (arcname, local_path) pairs for local files to include in a backup."""
+) -> Tuple[List[Tuple[str, Path]], List[Dict[str, str]]]:
+    """Return (arcname, local_path) pairs for local files to include in a backup.
+
+    Also returns each configured store whose local path does not exist, so the
+    caller can report it instead of writing a partial archive with no sign that
+    a store was dropped (#2009).
+    """
     sources: List[Tuple[str, Path]] = []
+    skipped: List[Dict[str, str]] = []
 
     if not strip_config and include in ("config", "all"):
         candidates: List[str] = [c for c in [config_path, "semantica.yaml", "semantica.yml"] if c]
@@ -5302,6 +5308,8 @@ def _collect_backup_sources(
         _dp: Any = info.get("path") or info.get("data_path") or info.get("index_path")
         data_path: Optional[str] = str(_dp) if _dp else None
         if not data_path:
+            # No local path key at all: a cloud/database backend, which
+            # `backup info` reports as not file-copyable. Not a skip.
             continue
         p = Path(data_path)
         if p.is_dir():
@@ -5310,8 +5318,16 @@ def _collect_backup_sources(
                     sources.append((f"{store_type}/{f.relative_to(p)}", f))
         elif p.is_file():
             sources.append((f"{store_type}/{p.name}", p))
+        else:
+            # Redacted: this is shown in a warning and written to the
+            # manifest, even with --strip-config.
+            skipped.append({
+                "store": store_type,
+                "backend": str(info.get("backend", "unknown")),
+                "path": _redact(data_path),
+            })
 
-    return sources
+    return sources, skipped
 
 
 def _redact(uri: str) -> str:
@@ -5379,13 +5395,15 @@ def backup_info(cli_ctx: CLIContext, local_json: bool) -> None:
               help="Read passphrase from file (must not be world-readable).")
 @click.option("--strip-config", is_flag=True, default=False,
               help="Exclude semantica.yaml to avoid storing credentials at rest.")
+@click.option("--fail-on-skip", is_flag=True, default=False,
+              help="Exit non-zero when a configured store path does not exist.")
 @click.option("--dry-run", "local_dry", is_flag=True, default=False)
 @click.option("--quiet", "local_quiet", is_flag=True, default=False)
 @click.pass_obj
 def backup_create(
     cli_ctx: CLIContext, destination: str, include: str, compress: bool,
     encrypt: bool, keyfile: Optional[str], strip_config: bool,
-    local_dry: bool, local_quiet: bool,
+    fail_on_skip: bool, local_dry: bool, local_quiet: bool,
 ) -> None:
     """Create a full backup archive.
 
@@ -5424,7 +5442,20 @@ def backup_create(
             passphrase = None
 
         cfg = cli_ctx.config.to_dict()
-        sources = _collect_backup_sources(cfg, cli_ctx.config_path, include, strip_config)
+        sources, skipped = _collect_backup_sources(
+            cfg, cli_ctx.config_path, include, strip_config,
+        )
+        # A configured store whose path is missing was dropped without a word,
+        # so a partial archive was reported as a success (#2009). Report every
+        # one before the prompts, and before the empty-archive check below so
+        # the missing paths are named even when no store is left to back up.
+        for entry in skipped:
+            _warn(
+                cli_ctx,
+                f"Skipping {entry['store']} store ({entry['backend']}): "
+                f"path does not exist: {entry['path']}",
+            )
+
         # Fail before any prompt instead of writing an archive with no
         # store data in it (#1820).
         if include in ("graph", "vector", "triplet", "all") and not any(
@@ -5437,6 +5468,14 @@ def backup_create(
                 "backup create only copies file-based stores (a graph_db / vector_store / "
                 "triplet_store path that exists on disk); run `semantica backup info` "
                 "to see how to back up other backends."
+            )
+
+        if skipped and fail_on_skip:
+            missing = ", ".join(f"{e['store']} ({e['path']})" for e in skipped)
+            raise click.ClickException(
+                f"Configured store path does not exist: {missing}. Nothing from "
+                "those stores would be in the archive; create the path, drop it "
+                "from the config, or omit --fail-on-skip to back up the rest."
             )
 
         if encrypt and passphrase is None:
@@ -5461,6 +5500,7 @@ def backup_create(
                 "include": include,
                 "version": str(__version__),
                 "files": [arcname for arcname, _ in sources],
+                "skipped": skipped,
             }
             (tmp_path / "backup_manifest.json").write_text(
                 json.dumps(manifest, indent=2), encoding="utf-8",
@@ -5546,7 +5586,9 @@ def backup_sync(cli_ctx: CLIContext, destination: str, include: str,
         import shutil
         dest = Path(destination)
         cfg = cli_ctx.config.to_dict()
-        sources = _collect_backup_sources(cfg, cli_ctx.config_path, include, strip_config=False)
+        sources, _skipped = _collect_backup_sources(
+            cfg, cli_ctx.config_path, include, strip_config=False,
+        )
         if _is_dry(cli_ctx, local_dry):
             _dry(cli_ctx, "sync backup", destination=str(dest), include=include,
                  files=[a for a, _ in sources])

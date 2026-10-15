@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`semantica backup create` reported success for an archive with no store data** (fixes #1820) by @costajohnt
   - With no file-based `graph_db` / `vector_store` / `triplet_store` path in the config, `backup create` wrote a manifest with `"files": []` and exited 0. It now fails with an error that points to `semantica backup info`, before asking for a passphrase or confirmation and before writing anything.
 
+- **`semantica backup create` dropped a configured store whose path was missing** (fixes #2009) by @nilaymallikk
+  - A configured `graph_db` or `vector_store` whose `path` / `data_path` / `index_path` did not exist on disk was left out of the archive with no warning, so a partial backup reported `✓ Backup created` and exited 0 — the remaining case from #1820, which only covered the archive that was empty of *every* store. Each skipped store is now named in a warning before the passphrase and confirmation prompts, including when every configured store is missing and the #1820 error follows, and recorded under `"skipped"` in `backup_manifest.json`. A backend with no local path key (Pinecone, Neo4j, ...) is not a skip and is not reported
+  - The reported path is passed through the same credential redaction as `backup info`, so a connection string with a password never reaches the warning or the manifest, including with `--strip-config`
+  - New `--fail-on-skip` turns that warning into a non-zero exit for scheduled and CI backups, which must never archive a partial store set. It runs before anything is written, so a failing run leaves no archive behind. The default stays exit 0, so a config that names a store path which has not been created yet keeps working unchanged
+  - New cases in `tests/test_cli_commands.py::TestBackup` cover both directions of the skip, every store missing, the manifest entry, `--fail-on-skip`, credential redaction, and the cloud-backend no-false-positive case
+
 - **`calculate_pagerank` rebuilt the adjacency once per node for a plain graph dictionary** (fixes #1842)
   - `_get_filtered_neighbors` called `build_adjacency(graph, directed=True)` for every node, making neighbour resolution O(N * (N + E)). `calculate_pagerank` now builds it once before the node loop and passes it in through a new optional `adjacency` argument; scores are unchanged. New `tests/kg/test_centrality_pagerank_adjacency_reuse.py`
 

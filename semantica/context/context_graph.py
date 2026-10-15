@@ -117,6 +117,7 @@ import stat
 import tempfile
 import threading
 import uuid
+from bisect import bisect_left
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -4599,6 +4600,14 @@ class ContextGraph:
                 entity_candidates.update(self._entity_index.get(entity, set()))
             candidates = candidates.intersection(entity_candidates)
         
+        # Reuse a query-local snapshot of node types and outgoing degrees. The
+        # structural score is the maximum over all other nodes, so scanning and
+        # sorting the entire graph once per decision is unnecessary.
+        structural_scores = (
+            self._precedent_structural_scores(candidates)
+            if self.config.get("advanced_analytics") else {}
+        )
+
         # Calculate similarities
         precedents = []
         for decision_id in candidates:
@@ -4614,9 +4623,7 @@ class ContextGraph:
             content_sim = self._calculate_decision_content_similarity(scenario, decision)
             
             # Structural similarity (graph-based)
-            structural_sim = 0.0
-            if self.config.get("advanced_analytics"):
-                structural_sim = self._calculate_structural_similarity_for_decision(decision_id, scenario)
+            structural_sim = structural_scores.get(decision_id, 0.0)
             
             # Combined similarity
             combined_sim = 0.7 * content_sim + 0.3 * structural_sim
@@ -5505,6 +5512,48 @@ class ContextGraph:
             self.logger.exception("Content similarity calculation failed")
             return 0.0
     
+    def _precedent_structural_scores(self, decision_ids: Set[str]) -> Dict[str, float]:
+        """Return the existing structural score without per-decision graph scans.
+
+        ``find_similar_nodes(..., similarity_type="structural")`` compares node
+        type and outgoing degree. Its highest score is therefore determined by
+        the nearest *other* degree of the same type. Keep this index local to the
+        call so graph mutations and reloads cannot leave stale scores behind.
+        """
+        degree_counts: Dict[str, Dict[int, int]] = defaultdict(lambda: defaultdict(int))
+        decision_degrees: Dict[str, Tuple[str, int]] = {}
+        with self._lock:
+            for node_id, node in self.nodes.items():
+                degree_counts[node.node_type][len(self._adjacency.get(node_id, ()))] += 1
+            for decision_id in decision_ids:
+                node = self.nodes.get(decision_id)
+                if node is not None:
+                    decision_degrees[decision_id] = (
+                        node.node_type,
+                        len(self._adjacency.get(decision_id, ())),
+                    )
+
+        sorted_degrees = {
+            node_type: sorted(counts)
+            for node_type, counts in degree_counts.items()
+        }
+        scores: Dict[str, float] = {}
+        for decision_id, (node_type, degree) in decision_degrees.items():
+            counts = degree_counts[node_type]
+            if counts[degree] > 1:
+                scores[decision_id] = 1.0
+                continue
+            degrees = sorted_degrees[node_type]
+            position = bisect_left(degrees, degree)
+            lower = degrees[position - 1] if position > 0 else None
+            upper = degrees[position + 1] if position + 1 < len(degrees) else None
+            scores[decision_id] = max(
+                (1.0 - abs(degree - other) / max(degree, other, 1)
+                 for other in (lower, upper) if other is not None),
+                default=0.0,
+            )
+        return scores
+
     def _calculate_structural_similarity_for_decision(self, decision_id: str, scenario: str) -> float:
         """Calculate structural similarity using graph algorithms."""
         try:
