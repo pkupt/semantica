@@ -330,10 +330,14 @@ def _node_properties(label: str, metadata: dict) -> dict:
     rest of the codebase calls ``add_node``. Passing it as a ``metadata=``
     keyword nests the whole mapping under a ``"metadata"`` key instead.
     """
-    properties = {"label": label}
-    for key, value in (metadata or {}).items():
-        if key not in _NODE_ARG_NAMES:
-            properties[key] = value
+    properties = {
+        key: value
+        for key, value in (metadata or {}).items()
+        if key not in _NODE_ARG_NAMES
+    }
+    # The explicit label wins over a metadata entry that happens to be named
+    # "label", so a caller cannot accidentally relabel the entity.
+    properties["label"] = label
     return properties
 
 
@@ -344,9 +348,12 @@ def _tool_add_entity(args: dict) -> dict:
     node_type = args.get("type", "Entity")
     if not node_id:
         return {"error": "id is required"}
+    content = args.get("content") or label
+    if content is not None and not isinstance(content, str):
+        return {"error": "content must be a string"}
     graph = _get_graph()
     graph.add_node(node_id=node_id, node_type=node_type,
-                   content=args.get("content") or label,
+                   content=content,
                    **_node_properties(label, args.get("metadata")))
     # Persist back to disk so the entity survives server restarts.
     kg_path = os.environ.get("SEMANTICA_KG_PATH")
@@ -808,6 +815,7 @@ TOOLS = [
                 "id":       {"type": "string", "description": "Unique node ID"},
                 "label":    {"type": "string", "description": "Human-readable label"},
                 "type":     {"type": "string", "description": "Node type, e.g. 'Person', 'Organisation'"},
+                "content":  {"type": "string", "description": "Defaults to the label"},
                 "metadata": {"type": "object", "description": "Additional properties"},
             },
             "required": ["id"],

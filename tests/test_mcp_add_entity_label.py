@@ -77,6 +77,19 @@ class TestPackageAddEntity(unittest.TestCase):
         self.assertNotIn("error", result, result)
         self.assertEqual(graph.nodes["e4"].content, "e4")
 
+    def test_non_string_content_is_rejected(self):
+        for bad in ({"a": 1}, ["x"], 7):
+            with self.subTest(content=bad):
+                result, _ = self._add({"id": "e5", "label": "X", "content": bad})
+                self.assertIn("error", result)
+
+    def test_metadata_label_does_not_override_the_explicit_label(self):
+        result, graph = self._add(
+            {"id": "e6", "label": "Apple Inc.", "metadata": {"label": "Wrong"}}
+        )
+        self.assertNotIn("error", result, result)
+        self.assertEqual(graph.nodes["e6"].properties.get("label"), "Apple Inc.")
+
 
 class TestLegacyAddEntity(unittest.TestCase):
     """semantica.mcp_server._tool_add_entity"""
@@ -120,6 +133,39 @@ class TestLegacyAddEntity(unittest.TestCase):
         result = legacy_mcp._tool_add_entity({"id": "e4"})
         self.assertNotIn("error", result, result)
         self.assertEqual(legacy_mcp._graph.nodes["e4"].content, "e4")
+
+    def test_non_string_content_is_rejected(self):
+        for bad in ({"a": 1}, ["x"], 7):
+            with self.subTest(content=bad):
+                result = legacy_mcp._tool_add_entity(
+                    {"id": "e5", "label": "X", "content": bad}
+                )
+                self.assertIn("error", result)
+
+    def test_metadata_label_does_not_override_the_explicit_label(self):
+        result = legacy_mcp._tool_add_entity(
+            {"id": "e6", "label": "Apple Inc.", "metadata": {"label": "Wrong"}}
+        )
+        self.assertNotIn("error", result, result)
+        self.assertEqual(
+            legacy_mcp._graph.nodes["e6"].properties.get("label"), "Apple Inc."
+        )
+
+
+class TestAddEntitySchemaDeclaresContent(unittest.TestCase):
+    """The handlers accept ``content``, so both schemas have to advertise it."""
+
+    def test_package_schema_declares_content(self):
+        from semantica_mcp.mcp.schemas import ADD_ENTITY
+
+        self.assertIn("content", ADD_ENTITY["properties"])
+        self.assertEqual(ADD_ENTITY["properties"]["content"]["type"], "string")
+
+    def test_legacy_schema_declares_content(self):
+        [tool] = [t for t in legacy_mcp.TOOLS if t["name"] == "add_entity"]
+
+        self.assertIn("content", tool["inputSchema"]["properties"])
+        self.assertEqual(tool["inputSchema"]["properties"]["content"]["type"], "string")
 
 
 if __name__ == "__main__":

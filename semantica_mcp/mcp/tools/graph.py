@@ -33,10 +33,14 @@ def _node_properties(label: str, metadata: dict | None) -> dict:
     rest of the codebase calls ``add_node``. Passing it as a ``metadata=``
     keyword nests the whole mapping under a ``"metadata"`` key instead.
     """
-    properties = {"label": label}
-    for key, value in (metadata or {}).items():
-        if key not in _NODE_ARG_NAMES:
-            properties[key] = value
+    properties = {
+        key: value
+        for key, value in (metadata or {}).items()
+        if key not in _NODE_ARG_NAMES
+    }
+    # The explicit label wins over a metadata entry that happens to be named
+    # "label", so a caller cannot accidentally relabel the entity.
+    properties["label"] = label
     return properties
 
 
@@ -48,10 +52,13 @@ def handle_add_entity(args: dict) -> dict:
     try:
         graph = get_graph()
         label = args.get("label", node_id)
+        content = args.get("content") or label
+        if content is not None and not isinstance(content, str):
+            return {"error": "content must be a string"}
         graph.add_node(
             node_id=node_id,
             node_type=args.get("type", "Entity"),
-            content=args.get("content") or label,
+            content=content,
             **_node_properties(label, args.get("metadata")),
         )
         # Persist back to disk so the entity survives server restarts.
