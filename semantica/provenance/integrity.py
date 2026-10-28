@@ -144,6 +144,14 @@ def compute_checksum(entry: Any) -> str:
     verify_chain() (it requires a delete+insert, which breaks the chain for
     whatever the deleted row's successor was).
 
+    The encoding version is stamped onto ``entry`` as a side effect, because
+    verification dispatches on it: a caller who assigns the digest by hand
+    (``entry.checksum = compute_checksum(entry)``, as the example below does)
+    never passes through the manager's stamping path, and without the stamp
+    ``verify_checksum()`` would read a missing version as v1 and reject a
+    valid v2 digest. ``checksum_version`` is not itself hashed, so writing it
+    does not change the digest that was just computed.
+
     Args:
         entry: ProvenanceEntry or dict to compute checksum for
 
@@ -161,6 +169,10 @@ def compute_checksum(entry: Any) -> str:
         >>> print(checksum)
         'a3b2c1d4e5f6...'
     """
+    if isinstance(entry, dict):
+        entry["checksum_version"] = CHECKSUM_VERSION
+    elif hasattr(entry, "checksum_version"):
+        entry.checksum_version = CHECKSUM_VERSION
     return hashlib.sha256(_encode_fields(_checksum_field_values(entry))).hexdigest()
 
 

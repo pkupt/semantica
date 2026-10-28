@@ -103,6 +103,35 @@ class TestVersionDispatch:
     def test_no_checksum_is_not_valid(self):
         assert verify_checksum({"entity_type": "entity"}) is False
 
+    def test_hand_assigned_checksum_verifies_on_a_dict(self):
+        """The documented usage assigns the digest by hand, never passing
+        through the manager's stamping path, so compute_checksum() has to
+        record the version itself or verification reads it as v1 and rejects
+        a digest it just produced."""
+        entry = {"entity_type": "entity", "activity_id": "a"}
+        entry["checksum"] = compute_checksum(entry)
+        assert entry["checksum_version"] == CHECKSUM_VERSION
+        assert verify_checksum(entry) is True
+
+    def test_hand_assigned_checksum_verifies_on_a_dataclass(self):
+        entry = ProvenanceEntry(
+            entity_id="e1",
+            entity_type="entity",
+            activity_id="a",
+            agent_id="agent",
+            agent_type="human",
+            source_document="doc",
+        )
+        entry.checksum = compute_checksum(entry)
+        assert entry.checksum_version == CHECKSUM_VERSION
+        assert verify_checksum(entry) is True
+
+    def test_stamping_does_not_change_the_digest(self):
+        entry = {"entity_type": "entity", "activity_id": "a"}
+        first = compute_checksum(entry)
+        second = compute_checksum(entry)
+        assert first == second
+
 
 class TestStorageRoundTrip:
     def test_checksum_version_survives_sqlite(self, tmp_path):
