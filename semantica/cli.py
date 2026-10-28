@@ -556,10 +556,7 @@ def _show_startup(cli_ctx: CLIContext) -> None:
         return
     cfg = cli_ctx.config.to_dict()
     graph_store = _resolve_graph_backend(cli_ctx)
-    vector_store = (
-        cli_ctx.vector_store_backend
-        or cfg.get("vector_store", {}).get("backend", "faiss")
-    )
+    vector_store = _configured_vector_backend(cli_ctx) or _DEFAULT_VECTOR_BACKEND
     profile = cfg.get("profile", "default")
 
     console.print()
@@ -827,6 +824,42 @@ def shell(ctx: click.Context) -> None:
             _warn(cli_ctx, f"Error: {exc}")
 
 
+def _plain_release(version: str) -> Optional[Tuple[int, ...]]:
+    """Parse a plain X.Y.Z release into a comparable tuple, or None.
+
+    Trailing zero components are dropped so 0.8 and 0.8.0 compare equal.
+    """
+    if not re.fullmatch(r"\d+(\.\d+)*", version):
+        return None
+    parts = [int(p) for p in version.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def _compare_versions(a: str, b: str) -> Optional[int]:
+    """Compare two version strings: 1 if a > b, 0 if equal, -1 if a < b.
+
+    Uses PEP 440 ordering when packaging is installed. It is not a core
+    dependency (#1513), so without it only plain X.Y.Z releases are ordered.
+    Returns None when no ordering can be established (e.g. a missing release
+    tag), so callers never guess an update from string equality.
+    """
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ImportError:
+        ra, rb = _plain_release(a), _plain_release(b)
+        if ra is None or rb is None:
+            return 0 if a == b else None
+        return (ra > rb) - (ra < rb)
+
+    try:
+        va, vb = Version(a), Version(b)
+    except InvalidVersion:
+        return None
+    return (va > vb) - (va < vb)
+
+
 @main.command()
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
@@ -850,20 +883,36 @@ def changelog(cli_ctx: CLIContext, local_json: bool) -> None:
         tag: str = data.get("tag_name", "unknown")
         body: str = data.get("body", "").strip()
         html_url: str = data.get("html_url", "")
-        latest = tag.lstrip("v")
+        latest = tag.removeprefix("v")
         current = __version__
+        order = _compare_versions(latest, current)
+        update_available = None if order is None else order > 0
 
         if _is_json(cli_ctx, local_json):
-            _jecho({"current": current, "latest": latest, "url": html_url, "notes": body})
+            _jecho({
+                "current": current,
+                "latest": latest,
+                "update_available": update_available,
+                "url": html_url,
+                "notes": body,
+            })
             return
 
-        up_to_date = latest == current
-        status = (
-            f"[{_SUCCESS}]You are on the latest version ({current})[/{_SUCCESS}]"
-            if up_to_date
-            else f"[{_WARN_STY}]Update available: {current} → {latest}[/{_WARN_STY}]\n"
-                 f"[{_DIM}]pip install --upgrade semantica[/{_DIM}]"
-        )
+        if order is None:
+            status = f"[{_DIM}]Could not compare {current} with release {tag}[/{_DIM}]"
+        elif order > 0:
+            status = (
+                f"[{_WARN_STY}]Update available: {current} → {latest}[/{_WARN_STY}]\n"
+                f"[{_DIM}]pip install --upgrade semantica[/{_DIM}]"
+            )
+        elif order == 0:
+            status = f"[{_SUCCESS}]You are on the latest version ({current})[/{_SUCCESS}]"
+        else:
+            # A dev or unreleased build sorts above the latest published release.
+            status = (
+                f"[{_SUCCESS}]You are ahead of the latest release "
+                f"({current} > {latest})[/{_SUCCESS}]"
+            )
         console.print(
             Panel(
                 Text.from_markup(
@@ -876,7 +925,7 @@ def changelog(cli_ctx: CLIContext, local_json: bool) -> None:
                 padding=(1, 2),
             )
         )
-        if html_url and not up_to_date:
+        if html_url and update_available:
             console.print(f"  [{_DIM}]Full notes: {html_url}[/{_DIM}]")
 
     _run_with_error_handling(_action)
@@ -953,14 +1002,73 @@ def doctor(cli_ctx: CLIContext, local_json: bool, deep_embeddings: bool) -> None
             return f"{backend} reachable"
         checks.append(_check("Graph store", _graph, hint="run 'semantica store list' to see configured backends"))
 
-        # Vector store
+        # Vector store: the one CLI commands build (--vector-store or
+        # vector_store.backend). The MCP server's own store is checked below.
+        configured_vector = _configured_vector_backend(cli_ctx)
+        mcp_configured = _mcp_stores_configured()
+
         def _vector() -> str:
-            cfg = cli_ctx.config.to_dict()
-            backend = cli_ctx.vector_store_backend or cfg.get("vector_store", {}).get("backend", "faiss")
+            backend = configured_vector or _DEFAULT_VECTOR_BACKEND
             if backend == "faiss":
                 import faiss  # noqa: F401
+            elif backend == "sqlite":
+                _probe_sqlite_vec()
+                return "sqlite-vec loaded"
             return f"{backend} importable"
-        checks.append(_check("Vector store", _vector, hint="pip install semantica[vectorstore-…]"))
+        vector_row = _check(
+            "Vector store", _vector, hint="pip install semantica[vectorstore-…]"
+        )
+        if vector_row[1] == "fail" and not configured_vector and mcp_configured:
+            # Nothing asked the CLI for faiss and this deployment configures
+            # the MCP server instead, so the missing default is not an error
+            # for it — only for CLI vector commands (#1818).
+            vector_row = (
+                "Vector store", "warn", f"{vector_row[2]} (CLI default)",
+                "set vector_store.backend to use CLI vector commands",
+            )
+        checks.append(vector_row)
+
+        # MCP server stores (#1818): configured only through the environment
+        # and resolved by the server's own session helpers, so this reports
+        # exactly what `semantica mcp` would build.
+        def _mcp_vector() -> str:
+            from semantica_mcp.mcp.session import resolve_vector_backend
+
+            backend, _ = resolve_vector_backend()
+            if backend == "sqlite":
+                _probe_sqlite_vec()
+                return "sqlite-vec loaded"
+            return backend
+
+        def _mcp_graph() -> str:
+            from semantica_mcp.mcp.session import kg_file_to_load, kg_path
+            from .context import ContextGraph
+
+            if not kg_path():
+                return "in-memory, not persisted (SEMANTICA_KG_PATH unset)"
+            path = kg_file_to_load()
+            if path is None:
+                return "new graph, created on first save"
+            graph = ContextGraph()
+            try:
+                graph.load_from_file(path)
+            except Exception as exc:
+                # The server would start empty and refuse to save over it.
+                raise RuntimeError(
+                    f"cannot load {path}: {exc}; persistence would be disabled"
+                ) from exc
+            return f"{len(graph.get_nodes_by_label('decision'))} decision(s)"
+
+        if mcp_configured:
+            checks.append(_check(
+                "MCP vector store", _mcp_vector,
+                hint="check SEMANTICA_VECTOR_*; sqlite needs "
+                     "pip install 'semantica[vectorstore-sqlite]'",
+            ))
+            checks.append(_check(
+                "MCP graph", _mcp_graph,
+                hint="fix or move the file at SEMANTICA_KG_PATH",
+            ))
 
         # Embedding backends (#994): `doctor` used to report all green while
         # every local embedding backend was non-functional — import success
@@ -1273,6 +1381,19 @@ _LOCK_TIMEOUT_SECONDS = 10.0
 # `semantica init` offers memory as its default and ContextGraph serves it
 # without any server, so it is also the fallback when nothing is configured.
 _DEFAULT_GRAPH_BACKEND = MEMORY_GRAPH_BACKEND
+# VectorStore's own default: what CLI vector commands build when neither
+# --vector-store nor vector_store.backend is set.
+_DEFAULT_VECTOR_BACKEND = "faiss"
+# Environment that configures the MCP server's stores
+# (semantica_mcp/mcp/session.py). It never changes what the CLI builds, so
+# ``doctor`` reports it in rows of its own rather than folding it into the
+# CLI's vector and graph checks (#1818).
+_MCP_STORE_ENV_VARS = (
+    "SEMANTICA_VECTOR_BACKEND",
+    "SEMANTICA_VECTOR_DB_PATH",
+    "SEMANTICA_VECTOR_PATH",
+    "SEMANTICA_KG_PATH",
+)
 
 
 def _resolve_graph_backend(cli_ctx: CLIContext) -> str:
@@ -1286,6 +1407,33 @@ def _resolve_graph_backend(cli_ctx: CLIContext) -> str:
     return cli_ctx.store_backend or graph_db.get(
         "backend", _DEFAULT_GRAPH_BACKEND
     )
+
+
+def _configured_vector_backend(cli_ctx: CLIContext) -> Optional[str]:
+    """The ``--vector-store`` flag or ``vector_store.backend``; None if unset."""
+    return cli_ctx.vector_store_backend or cli_ctx.config.to_dict().get(
+        "vector_store", {}
+    ).get("backend")
+
+
+def _mcp_stores_configured() -> bool:
+    """True when the environment configures the MCP server's stores."""
+    return any(os.environ.get(var, "").strip() for var in _MCP_STORE_ENV_VARS)
+
+
+def _probe_sqlite_vec() -> None:
+    """Raise unless the sqlite-vec extension actually loads.
+
+    ``SQLITE_VEC_AVAILABLE`` is a ``find_spec`` probe: it proves the package is
+    discoverable, not that the native extension loads. Building a throwaway
+    in-memory store runs the store's real load path, so a broken install fails
+    here rather than on first use.
+    """
+    from .vector_store.sqlite_vec_store import SQLITE_VEC_AVAILABLE, SQLiteVecStore
+
+    if not SQLITE_VEC_AVAILABLE:
+        raise ImportError("sqlite-vec is not installed")
+    SQLiteVecStore(db_path=":memory:", table_name="doctor_probe", dimension=1).close()
 
 
 def _uses_memory_graph(cli_ctx: CLIContext) -> bool:
