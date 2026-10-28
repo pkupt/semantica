@@ -180,7 +180,10 @@ class BridgeAxiom:
         # Track provenance if manager provided
         provenance_recorded = False
         provenance_error: Optional[str] = None
-        if prov_manager:
+        # "is not None", not truthiness: a manager that defines __len__ (an
+        # empty store) is still a manager, and skipping it would report the
+        # write as never attempted instead of failing closed.
+        if prov_manager is not None:
             metadata = {
                 "axiom_id": self.axiom_id,
                 "axiom_name": self.name,
@@ -193,6 +196,12 @@ class BridgeAxiom:
                 "output_domain": self.output_domain,
                 **kwargs,
             }
+            # Only the exception type is reported, in the raised message and in
+            # provenance_error alike. The text of a storage failure can carry
+            # SQL and filesystem paths, and both strings reach logs and API
+            # responses; the original exception stays attached as __cause__.
+            failure: Optional[str] = None
+            cause: Optional[BaseException] = None
             try:
                 # Track the bridge axiom application
                 recorded = prov_manager.track_entity(
@@ -205,6 +214,10 @@ class BridgeAxiom:
                     confidence=self.confidence,
                     metadata=metadata,
                 )
+            except Exception as exc:
+                failure = type(exc).__name__
+                cause = exc
+            else:
                 # ProvenanceManager logs storage failures instead of raising:
                 # it returns None for a new entity, or a copy of the old entry
                 # when an update fails. Either way this application is not on
@@ -212,21 +225,20 @@ class BridgeAxiom:
                 if isinstance(prov_manager, ProvenanceManager) and (
                     recorded is None or recorded.metadata != metadata
                 ):
-                    raise RuntimeError("provenance storage did not persist the entry")
+                    failure = (
+                        "storage did not persist the entry "
+                        "(see the ProvenanceManager log)"
+                    )
+
+            if failure is None:
                 provenance_recorded = True
-            except Exception as exc:
-                if require_provenance:
-                    # Only the exception type goes into the message. The text
-                    # of a storage failure can carry SQL and filesystem paths,
-                    # and this string reaches logs and API responses; the
-                    # original exception stays attached as __cause__ for
-                    # anyone debugging.
-                    raise ProvenanceRecordingError(
-                        "Could not record provenance for "
-                        f"{output_entity!r}: {type(exc).__name__}",
-                        entity_id=output_entity,
-                    ) from exc
-                provenance_error = f"{type(exc).__name__}: {exc}"
+            elif require_provenance:
+                raise ProvenanceRecordingError(
+                    f"Could not record provenance for {output_entity!r}: {failure}",
+                    entity_id=output_entity,
+                ) from cause
+            else:
+                provenance_error = failure
 
         return {
             "axiom_id": self.axiom_id,
@@ -468,7 +480,8 @@ def trace_translation_chain(
             try:
                 layer_trace["provenance"] = prov_manager.get_lineage(entity_id)
             except Exception as exc:
-                layer_trace["provenance_error"] = f"{type(exc).__name__}: {exc}"
+                # Type only, for the same reason as in BridgeAxiom.apply().
+                layer_trace["provenance_error"] = type(exc).__name__
 
         trace["layers"].append(layer_trace)
     
