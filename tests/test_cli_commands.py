@@ -5271,6 +5271,18 @@ class _FakeUrlopenResponse:
         return self._payload
 
 
+def _stub_release(monkeypatch, tag_name: str) -> None:
+    """Make the changelog's GitHub release lookup return *tag_name*."""
+    import urllib.request
+
+    payload = json.dumps({"tag_name": tag_name, "body": "", "html_url": ""}).encode()
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *a, **kw: _FakeUrlopenResponse(payload),
+    )
+
+
 class TestChangelogVersionTag:
     """changelog must strip the "v" prefix, not a run of leading characters.
 
@@ -5278,19 +5290,6 @@ class TestChangelogVersionTag:
     a tag like ``vv1.2.3`` lost both leading v's. ``removeprefix("v")`` strips
     exactly one, which is the documented intent.
     """
-
-    @staticmethod
-    def _stub_release(monkeypatch, tag_name: str) -> None:
-        import urllib.request
-
-        payload = json.dumps(
-            {"tag_name": tag_name, "body": "", "html_url": ""}
-        ).encode()
-        monkeypatch.setattr(
-            urllib.request,
-            "urlopen",
-            lambda *a, **kw: _FakeUrlopenResponse(payload),
-        )
 
     @pytest.mark.parametrize(
         "tag_name,expected",
@@ -5303,7 +5302,7 @@ class TestChangelogVersionTag:
     def test_changelog_json_latest_strips_one_v(
         self, runner, monkeypatch, tag_name, expected
     ):
-        self._stub_release(monkeypatch, tag_name)
+        _stub_release(monkeypatch, tag_name)
         result = runner.invoke(cli_module.main, ["changelog", "--json"])
         _ok(result)
         assert json.loads(result.output)["latest"] == expected
@@ -5331,7 +5330,7 @@ class TestChangelogUpdateCheck:
     def test_changelog_json_update_available(
         self, runner, monkeypatch, current, tag_name, expected
     ):
-        TestChangelogVersionTag._stub_release(monkeypatch, tag_name)
+        _stub_release(monkeypatch, tag_name)
         monkeypatch.setattr(cli_module, "__version__", current)
         result = runner.invoke(cli_module.main, ["changelog", "--json"])
         _ok(result)
@@ -5349,7 +5348,7 @@ class TestChangelogUpdateCheck:
     def test_changelog_status_line(
         self, runner, monkeypatch, current, tag_name, shown, hidden
     ):
-        TestChangelogVersionTag._stub_release(monkeypatch, tag_name)
+        _stub_release(monkeypatch, tag_name)
         monkeypatch.setattr(cli_module, "__version__", current)
         result = runner.invoke(cli_module.main, ["changelog"])
         _ok(result)
@@ -5383,7 +5382,7 @@ class TestChangelogWithoutPackaging:
 
         # A None entry makes ``from packaging.version import ...`` raise ImportError.
         monkeypatch.setitem(sys.modules, "packaging.version", None)
-        TestChangelogVersionTag._stub_release(monkeypatch, tag_name)
+        _stub_release(monkeypatch, tag_name)
         monkeypatch.setattr(cli_module, "__version__", current)
         result = runner.invoke(cli_module.main, ["changelog", "--json"])
         _ok(result)

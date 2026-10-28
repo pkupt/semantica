@@ -827,26 +827,31 @@ def shell(ctx: click.Context) -> None:
             _warn(cli_ctx, f"Error: {exc}")
 
 
-def _compare_versions(a: str, b: str) -> Optional[int]:
-    """Compare two PEP 440 version strings: 1 if a > b, 0 if equal, -1 if a < b.
+def _plain_release(version: str) -> Optional[Tuple[int, ...]]:
+    """Parse a plain X.Y.Z release into a comparable tuple, or None.
 
-    Returns None when either side does not parse (e.g. a missing release tag),
-    so callers never guess an ordering from string equality.
+    Trailing zero components are dropped so 0.8 and 0.8.0 compare equal.
+    """
+    if not re.fullmatch(r"\d+(\.\d+)*", version):
+        return None
+    parts = [int(p) for p in version.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def _compare_versions(a: str, b: str) -> Optional[int]:
+    """Compare two version strings: 1 if a > b, 0 if equal, -1 if a < b.
+
+    Uses PEP 440 ordering when packaging is installed. It is not a core
+    dependency (#1513), so without it only plain X.Y.Z releases are ordered.
+    Returns None when no ordering can be established (e.g. a missing release
+    tag), so callers never guess an update from string equality.
     """
     try:
         from packaging.version import InvalidVersion, Version
     except ImportError:
-        # packaging is not a core dependency (#1513): order plain X.Y.Z
-        # releases ourselves and give up on anything richer (dev, rc, ...).
-        def _release(v: str) -> Optional[Tuple[int, ...]]:
-            if not re.fullmatch(r"\d+(\.\d+)*", v):
-                return None
-            parts = [int(p) for p in v.split(".")]
-            while len(parts) > 1 and parts[-1] == 0:
-                parts.pop()
-            return tuple(parts)
-
-        ra, rb = _release(a), _release(b)
+        ra, rb = _plain_release(a), _plain_release(b)
         if ra is None or rb is None:
             return 0 if a == b else None
         return (ra > rb) - (ra < rb)
