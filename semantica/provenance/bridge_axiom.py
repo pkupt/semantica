@@ -63,7 +63,12 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 import uuid
 
+from ..utils.exceptions import SemanticaError
 from ..utils.helpers import utc_now_iso
+
+
+class ProvenanceRecordingError(SemanticaError):
+    """Raised when a translation is applied but its provenance cannot be recorded."""
 
 
 @dataclass
@@ -139,6 +144,7 @@ class BridgeAxiom:
         input_entity: str,
         input_value: float,
         prov_manager: Optional[Any] = None,
+        require_provenance: bool = True,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -148,10 +154,16 @@ class BridgeAxiom:
             input_entity: Input entity identifier
             input_value: Input value to transform
             prov_manager: ProvenanceManager instance (optional)
+            require_provenance: If True (default), raise
+                ProvenanceRecordingError when a prov_manager is given and the
+                write fails. If False, return the transform with
+                provenance_recorded=False and provenance_error set instead.
             **kwargs: Additional parameters
             
         Returns:
-            Dictionary with result and provenance information
+            Dictionary with result and provenance information. Always includes
+            provenance_recorded (bool) and provenance_error (str or None);
+            provenance_recorded is False without a prov_manager.
             
         Example:
             >>> result = ba.apply(
@@ -169,6 +181,8 @@ class BridgeAxiom:
         output_entity = f"{input_entity}_transformed_{self.axiom_id}"
         
         # Track provenance if manager provided
+        provenance_recorded = False
+        provenance_error: Optional[str] = None
         if prov_manager:
             try:
                 # Track the bridge axiom application
@@ -193,9 +207,14 @@ class BridgeAxiom:
                         **kwargs
                     }
                 )
-            except Exception:
-                pass  # Graceful failure
-        
+                provenance_recorded = True
+            except Exception as exc:
+                if require_provenance:
+                    raise ProvenanceRecordingError(
+                        f"Could not record provenance for {output_entity!r}: {exc}"
+                    ) from exc
+                provenance_error = f"{type(exc).__name__}: {exc}"
+
         return {
             "axiom_id": self.axiom_id,
             "axiom_name": self.name,
@@ -208,7 +227,9 @@ class BridgeAxiom:
             "source_doi": self.source_doi,
             "source_page": self.source_page,
             "input_domain": self.input_domain,
-            "output_domain": self.output_domain
+            "output_domain": self.output_domain,
+            "provenance_recorded": provenance_recorded,
+            "provenance_error": provenance_error
         }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -425,12 +446,13 @@ def trace_translation_chain(
         # Get provenance for entities in this layer
         entity_id = layer.get("entity_id")
         if entity_id:
+            layer_trace["provenance"] = None
+            layer_trace["provenance_error"] = None
             try:
-                lineage = prov_manager.get_lineage(entity_id)
-                layer_trace["provenance"] = lineage
-            except Exception:
-                pass
-        
+                layer_trace["provenance"] = prov_manager.get_lineage(entity_id)
+            except Exception as exc:
+                layer_trace["provenance_error"] = f"{type(exc).__name__}: {exc}"
+
         trace["layers"].append(layer_trace)
     
     return trace

@@ -8,6 +8,7 @@ import pytest
 from semantica.provenance import ProvenanceManager
 from semantica.provenance.bridge_axiom import (
     BridgeAxiom,
+    ProvenanceRecordingError,
     TranslationChain,
     create_translation_chain,
     trace_translation_chain
@@ -489,3 +490,66 @@ class TestEdgeCases:
         assert data["chain_id"] == "chain_dict"
         assert len(data["layers"]) == 1
         assert data["confidence"] == 1.0
+
+
+class TestProvenanceFailClosed:
+    """A failed provenance write must not be silent (issue #2137)."""
+
+    def _axiom(self):
+        return BridgeAxiom(
+            axiom_id="BA-FAIL-001",
+            name="fail_closed",
+            rule="Test rule",
+            coefficient=2.0,
+            source_doi="10.1234/test",
+            source_page="Page 1"
+        )
+
+    def test_failure_raises_by_default(self):
+        with pytest.raises(ProvenanceRecordingError, match="BA-FAIL-001"):
+            self._axiom().apply("in", 3, prov_manager=object())
+
+    def test_opt_out_returns_a_flag_instead_of_raising(self):
+        result = self._axiom().apply(
+            "in", 3, prov_manager=object(), require_provenance=False
+        )
+
+        assert result["output_value"] == 6.0
+        assert result["provenance_recorded"] is False
+        assert "AttributeError" in result["provenance_error"]
+
+    def test_successful_write_reports_recorded(self):
+        result = self._axiom().apply("in", 3, prov_manager=ProvenanceManager())
+
+        assert result["output_value"] == 6.0
+        assert result["provenance_recorded"] is True
+        assert result["provenance_error"] is None
+
+    def test_no_manager_is_not_a_failure(self):
+        result = self._axiom().apply("in", 3)
+
+        assert result["output_value"] == 6.0
+        assert result["provenance_recorded"] is False
+        assert result["provenance_error"] is None
+
+    def test_chain_propagates_the_failure(self):
+        with pytest.raises(ProvenanceRecordingError):
+            create_translation_chain(
+                {"entity_id": "e1", "value": 3, "source": "doc"},
+                [self._axiom()],
+                object()
+            )
+
+    def test_trace_reports_a_lineage_lookup_failure(self):
+        class _BadLineage:
+            def get_lineage(self, entity_id):
+                raise RuntimeError("lineage unavailable")
+
+        chain = TranslationChain(chain_id="chain_trace")
+        chain.add_layer("L1", "input", 1, entity_id="e1")
+
+        trace = trace_translation_chain(chain, _BadLineage())
+
+        layer = trace["layers"][0]
+        assert layer["provenance"] is None
+        assert "RuntimeError" in layer["provenance_error"]
