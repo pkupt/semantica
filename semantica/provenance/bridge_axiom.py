@@ -63,12 +63,9 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 import uuid
 
-from ..utils.exceptions import SemanticaError
+from ..utils.exceptions import ProvenanceRecordingError
 from ..utils.helpers import utc_now_iso
-
-
-class ProvenanceRecordingError(SemanticaError):
-    """Raised when a translation is applied but its provenance cannot be recorded."""
+from .manager import ProvenanceManager
 
 
 @dataclass
@@ -184,9 +181,21 @@ class BridgeAxiom:
         provenance_recorded = False
         provenance_error: Optional[str] = None
         if prov_manager:
+            metadata = {
+                "axiom_id": self.axiom_id,
+                "axiom_name": self.name,
+                "rule": self.rule,
+                "coefficient": self.coefficient,
+                "input_entity": input_entity,
+                "input_value": input_value,
+                "output_value": output_value,
+                "input_domain": self.input_domain,
+                "output_domain": self.output_domain,
+                **kwargs,
+            }
             try:
                 # Track the bridge axiom application
-                prov_manager.track_entity(
+                recorded = prov_manager.track_entity(
                     entity_id=output_entity,
                     source=self.source_doi,
                     entity_type="bridge_axiom_result",
@@ -194,24 +203,22 @@ class BridgeAxiom:
                     source_location=self.source_page,
                     source_quote=self.source_quote,
                     confidence=self.confidence,
-                    metadata={
-                        "axiom_id": self.axiom_id,
-                        "axiom_name": self.name,
-                        "rule": self.rule,
-                        "coefficient": self.coefficient,
-                        "input_entity": input_entity,
-                        "input_value": input_value,
-                        "output_value": output_value,
-                        "input_domain": self.input_domain,
-                        "output_domain": self.output_domain,
-                        **kwargs
-                    }
+                    metadata=metadata,
                 )
+                # ProvenanceManager logs storage failures instead of raising:
+                # it returns None for a new entity, or a copy of the old entry
+                # when an update fails. Either way this application is not on
+                # record, so treat it as a failed write.
+                if isinstance(prov_manager, ProvenanceManager) and (
+                    recorded is None or recorded.metadata != metadata
+                ):
+                    raise RuntimeError("provenance storage did not persist the entry")
                 provenance_recorded = True
             except Exception as exc:
                 if require_provenance:
                     raise ProvenanceRecordingError(
-                        f"Could not record provenance for {output_entity!r}: {exc}"
+                        f"Could not record provenance for {output_entity!r}: {exc}",
+                        entity_id=output_entity,
                     ) from exc
                 provenance_error = f"{type(exc).__name__}: {exc}"
 

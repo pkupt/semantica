@@ -553,3 +553,59 @@ class TestProvenanceFailClosed:
         layer = trace["layers"][0]
         assert layer["provenance"] is None
         assert "RuntimeError" in layer["provenance_error"]
+
+    def _broken_storage(self, manager, monkeypatch):
+        def fail(*args, **kwargs):
+            raise IOError("disk full")
+
+        monkeypatch.setattr(manager.storage, "store", fail)
+        monkeypatch.setattr(manager.storage, "_store_with_conn", fail)
+
+    def test_real_manager_storage_failure_raises(self, monkeypatch):
+        manager = ProvenanceManager()
+        self._broken_storage(manager, monkeypatch)
+
+        with pytest.raises(ProvenanceRecordingError) as excinfo:
+            self._axiom().apply("in", 3, prov_manager=manager)
+
+        assert excinfo.value.entity_id == "in_transformed_BA-FAIL-001"
+        assert excinfo.value.error_code == "SEM007"
+
+    def test_real_manager_storage_failure_is_reported_when_opted_out(
+        self, monkeypatch
+    ):
+        manager = ProvenanceManager()
+        self._broken_storage(manager, monkeypatch)
+
+        result = self._axiom().apply(
+            "in", 3, prov_manager=manager, require_provenance=False
+        )
+
+        assert result["provenance_recorded"] is False
+        assert result["provenance_error"] is not None
+
+    def test_failed_update_is_not_reported_as_recorded(self, monkeypatch):
+        # A failed update hands back a copy of the old entry; the new value
+        # must not be reported as recorded on the strength of that copy.
+        manager = ProvenanceManager()
+        axiom = self._axiom()
+        axiom.apply("in", 3, prov_manager=manager)
+        self._broken_storage(manager, monkeypatch)
+
+        result = axiom.apply("in", 5, prov_manager=manager, require_provenance=False)
+
+        assert result["output_value"] == 10.0
+        assert result["provenance_recorded"] is False
+        lineage = manager.get_lineage("in_transformed_BA-FAIL-001")
+        assert lineage["metadata"]["output_value"] == 6.0
+
+    def test_successful_update_is_recorded(self):
+        manager = ProvenanceManager()
+        axiom = self._axiom()
+        axiom.apply("in", 3, prov_manager=manager)
+
+        result = axiom.apply("in", 5, prov_manager=manager)
+
+        assert result["provenance_recorded"] is True
+        lineage = manager.get_lineage("in_transformed_BA-FAIL-001")
+        assert lineage["metadata"]["output_value"] == 10.0
