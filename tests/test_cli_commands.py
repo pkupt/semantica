@@ -5307,3 +5307,51 @@ class TestChangelogVersionTag:
         result = runner.invoke(cli_module.main, ["changelog", "--json"])
         _ok(result)
         assert json.loads(result.output)["latest"] == expected
+
+
+class TestChangelogUpdateCheck:
+    """changelog must order versions, not compare them as strings.
+
+    A build ahead of the latest release (e.g. 0.8.0 against a v0.7.0 tag) used
+    to be told "Update available: 0.8.0 → 0.7.0", recommending a downgrade.
+    """
+
+    @pytest.mark.parametrize(
+        "current,tag_name,expected",
+        [
+            ("0.7.0", "v0.8.0", True),
+            ("0.8.0", "v0.8.0", False),
+            ("0.8", "v0.8.0", False),
+            ("0.8.0", "v0.7.0", False),
+            ("0.8.0.dev1", "v0.7.0", False),
+            ("0.8.0rc1", "v0.8.0", True),
+            ("0.8.0", "unknown", None),
+        ],
+    )
+    def test_changelog_json_update_available(
+        self, runner, monkeypatch, current, tag_name, expected
+    ):
+        TestChangelogVersionTag._stub_release(monkeypatch, tag_name)
+        monkeypatch.setattr(cli_module, "__version__", current)
+        result = runner.invoke(cli_module.main, ["changelog", "--json"])
+        _ok(result)
+        assert json.loads(result.output)["update_available"] is expected
+
+    @pytest.mark.parametrize(
+        "current,tag_name,shown,hidden",
+        [
+            ("0.7.0", "v0.8.0", "Update available", "ahead of the latest"),
+            ("0.8.0", "v0.8.0", "on the latest version", "Update available"),
+            ("0.8.0", "v0.7.0", "ahead of the latest", "Update available"),
+            ("0.8.0", "unknown", "Could not compare", "Update available"),
+        ],
+    )
+    def test_changelog_status_line(
+        self, runner, monkeypatch, current, tag_name, shown, hidden
+    ):
+        TestChangelogVersionTag._stub_release(monkeypatch, tag_name)
+        monkeypatch.setattr(cli_module, "__version__", current)
+        result = runner.invoke(cli_module.main, ["changelog"])
+        _ok(result)
+        assert shown in result.output
+        assert hidden not in result.output

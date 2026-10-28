@@ -59,6 +59,7 @@ dependencies = [
   "scikit-learn>=1.7.2",
   "rdflib>=6.2.0",
   "networkx>=2.8.0",
+  "packaging>=22.0",
   "requests>=2.34.2",
   "chardet>=7.4.3",
   "protobuf>=5.29.1,<8.0",

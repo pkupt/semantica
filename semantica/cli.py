@@ -827,6 +827,21 @@ def shell(ctx: click.Context) -> None:
             _warn(cli_ctx, f"Error: {exc}")
 
 
+def _compare_versions(a: str, b: str) -> Optional[int]:
+    """Compare two PEP 440 version strings: 1 if a > b, 0 if equal, -1 if a < b.
+
+    Returns None when either side does not parse (e.g. a missing release tag),
+    so callers never guess an ordering from string equality.
+    """
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        va, vb = Version(a), Version(b)
+    except InvalidVersion:
+        return None
+    return (va > vb) - (va < vb)
+
+
 @main.command()
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
@@ -852,18 +867,34 @@ def changelog(cli_ctx: CLIContext, local_json: bool) -> None:
         html_url: str = data.get("html_url", "")
         latest = tag.removeprefix("v")
         current = __version__
+        order = _compare_versions(latest, current)
+        update_available = None if order is None else order > 0
 
         if _is_json(cli_ctx, local_json):
-            _jecho({"current": current, "latest": latest, "url": html_url, "notes": body})
+            _jecho({
+                "current": current,
+                "latest": latest,
+                "update_available": update_available,
+                "url": html_url,
+                "notes": body,
+            })
             return
 
-        up_to_date = latest == current
-        status = (
-            f"[{_SUCCESS}]You are on the latest version ({current})[/{_SUCCESS}]"
-            if up_to_date
-            else f"[{_WARN_STY}]Update available: {current} → {latest}[/{_WARN_STY}]\n"
-                 f"[{_DIM}]pip install --upgrade semantica[/{_DIM}]"
-        )
+        if order is None:
+            status = f"[{_DIM}]Could not compare {current} with release {tag}[/{_DIM}]"
+        elif order > 0:
+            status = (
+                f"[{_WARN_STY}]Update available: {current} → {latest}[/{_WARN_STY}]\n"
+                f"[{_DIM}]pip install --upgrade semantica[/{_DIM}]"
+            )
+        elif order == 0:
+            status = f"[{_SUCCESS}]You are on the latest version ({current})[/{_SUCCESS}]"
+        else:
+            # A dev or unreleased build sorts above the latest published release.
+            status = (
+                f"[{_SUCCESS}]You are ahead of the latest release "
+                f"({current} > {latest})[/{_SUCCESS}]"
+            )
         console.print(
             Panel(
                 Text.from_markup(
@@ -876,7 +907,7 @@ def changelog(cli_ctx: CLIContext, local_json: bool) -> None:
                 padding=(1, 2),
             )
         )
-        if html_url and not up_to_date:
+        if html_url and update_available:
             console.print(f"  [{_DIM}]Full notes: {html_url}[/{_DIM}]")
 
     _run_with_error_handling(_action)
