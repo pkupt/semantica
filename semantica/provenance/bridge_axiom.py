@@ -254,6 +254,11 @@ class BridgeAxiom:
             bound was crossed, so a caller can report or reject the result
             instead of carrying an extrapolated number along the chain.
 
+            The output value is still computed and returned when the input is
+            outside the window. Raising instead would conflate "the input is
+            out of range" with a storage failure, and refusing an extrapolated
+            number is the caller's decision to make, not this method's.
+
         Example:
             >>> result = ba.apply(
             ...     input_entity="cabo_pulmo_biomass",
