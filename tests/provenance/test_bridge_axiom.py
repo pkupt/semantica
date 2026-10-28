@@ -609,3 +609,35 @@ class TestProvenanceFailClosed:
         assert result["provenance_recorded"] is True
         lineage = manager.get_lineage("in_transformed_BA-FAIL-001")
         assert lineage["metadata"]["output_value"] == 10.0
+    def test_trace_layers_without_an_entity_still_carry_both_keys(self):
+        """A consumer walking the trace should not have to check for the key
+        first: a layer that names no entity reports "unavailable", it does not
+        omit the field."""
+        chain = TranslationChain(chain_id="chain_no_entity")
+        chain.add_layer("L2_axiom", "bridge_axiom", 2.0)
+
+        trace = trace_translation_chain(chain, ProvenanceManager())
+
+        layer = trace["layers"][0]
+        assert "provenance" in layer
+        assert "provenance_error" in layer
+        assert layer["provenance"] is None
+        assert layer["provenance_error"] is None
+
+    def test_the_raised_message_does_not_echo_the_storage_error(self):
+        """Storage failures carry SQL and paths. The message reaches logs and
+        API responses, so only the type goes in; the detail stays on the
+        cause."""
+
+        class _LeakyManager:
+            def track_entity(self, **kwargs):
+                raise RuntimeError("no such table: /home/analyst/secret.db")
+
+        with pytest.raises(ProvenanceRecordingError) as caught:
+            self._axiom().apply("in", 3, prov_manager=_LeakyManager())
+
+        message = str(caught.value)
+        assert "BA-FAIL-001" in message
+        assert "RuntimeError" in message
+        assert "secret.db" not in message
+        assert isinstance(caught.value.__cause__, RuntimeError)

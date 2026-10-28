@@ -216,8 +216,14 @@ class BridgeAxiom:
                 provenance_recorded = True
             except Exception as exc:
                 if require_provenance:
+                    # Only the exception type goes into the message. The text
+                    # of a storage failure can carry SQL and filesystem paths,
+                    # and this string reaches logs and API responses; the
+                    # original exception stays attached as __cause__ for
+                    # anyone debugging.
                     raise ProvenanceRecordingError(
-                        f"Could not record provenance for {output_entity!r}: {exc}",
+                        "Could not record provenance for "
+                        f"{output_entity!r}: {type(exc).__name__}",
                         entity_id=output_entity,
                     ) from exc
                 provenance_error = f"{type(exc).__name__}: {exc}"
@@ -447,14 +453,18 @@ def trace_translation_chain(
             "layer": layer.get("layer"),
             "type": layer.get("type"),
             "value": layer.get("value"),
-            "source": layer.get("source")
+            "source": layer.get("source"),
+            # Both keys exist on every layer, whether or not it names an
+            # entity: a consumer that walks the trace should read "provenance
+            # unavailable" rather than trip over a KeyError on the layers that
+            # have no entity_id.
+            "provenance": None,
+            "provenance_error": None,
         }
-        
+
         # Get provenance for entities in this layer
         entity_id = layer.get("entity_id")
         if entity_id:
-            layer_trace["provenance"] = None
-            layer_trace["provenance_error"] = None
             try:
                 layer_trace["provenance"] = prov_manager.get_lineage(entity_id)
             except Exception as exc:
