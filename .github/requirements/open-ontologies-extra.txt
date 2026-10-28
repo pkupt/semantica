@@ -458,12 +458,6 @@ open-ontologies-lite==0.5.0 \
     --hash=sha256:664e92cb6fbb79ebe7ff992728602e6ab34835b171e0dca34cf28d069c12a957 \
     --hash=sha256:7fc965c3b38421ce3fbddc4c6190bc50ee1b18a4a0edd816f36ff9440a4fb852
     # via semantica (pyproject.toml)
-packaging==26.3 \
-    --hash=sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79 \
-    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-    # via
-    #   -c requirements-ci.txt
-    #   semantica (pyproject.toml)
 pandas==3.0.5 \
     --hash=sha256:08d24fe11a17dc33bd6e937dc9c665f9cba08fbdc9f657f405713515febe300d \
     --hash=sha256:0d298e951f23016ce4699951d044ae6418dbc91bf68cefca0f77666fcbb4e5c6 \

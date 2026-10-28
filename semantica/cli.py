@@ -833,7 +833,23 @@ def _compare_versions(a: str, b: str) -> Optional[int]:
     Returns None when either side does not parse (e.g. a missing release tag),
     so callers never guess an ordering from string equality.
     """
-    from packaging.version import InvalidVersion, Version
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ImportError:
+        # packaging is not a core dependency (#1513): order plain X.Y.Z
+        # releases ourselves and give up on anything richer (dev, rc, ...).
+        def _release(v: str) -> Optional[Tuple[int, ...]]:
+            if not re.fullmatch(r"\d+(\.\d+)*", v):
+                return None
+            parts = [int(p) for p in v.split(".")]
+            while len(parts) > 1 and parts[-1] == 0:
+                parts.pop()
+            return tuple(parts)
+
+        ra, rb = _release(a), _release(b)
+        if ra is None or rb is None:
+            return 0 if a == b else None
+        return (ra > rb) - (ra < rb)
 
     try:
         va, vb = Version(a), Version(b)

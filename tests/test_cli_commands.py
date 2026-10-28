@@ -5355,3 +5355,36 @@ class TestChangelogUpdateCheck:
         _ok(result)
         assert shown in result.output
         assert hidden not in result.output
+
+
+class TestChangelogWithoutPackaging:
+    """packaging is not a core dependency (#1513), so a slim install may lack it.
+
+    The fallback must still order plain X.Y.Z releases and must never report
+    an update it cannot establish.
+    """
+
+    @pytest.mark.parametrize(
+        "current,tag_name,expected",
+        [
+            ("0.7.0", "v0.8.0", True),
+            ("0.8.0", "v0.7.0", False),
+            ("0.8", "v0.8.0", False),
+            ("0.10.0", "v0.9.0", False),
+            ("0.8.0.dev1", "v0.8.0.dev1", False),
+            ("0.8.0.dev1", "v0.7.0", None),
+            ("0.8.0", "unknown", None),
+        ],
+    )
+    def test_changelog_json_update_available_without_packaging(
+        self, runner, monkeypatch, current, tag_name, expected
+    ):
+        import sys
+
+        # A None entry makes ``from packaging.version import ...`` raise ImportError.
+        monkeypatch.setitem(sys.modules, "packaging.version", None)
+        TestChangelogVersionTag._stub_release(monkeypatch, tag_name)
+        monkeypatch.setattr(cli_module, "__version__", current)
+        result = runner.invoke(cli_module.main, ["changelog", "--json"])
+        _ok(result)
+        assert json.loads(result.output)["update_available"] is expected
