@@ -392,6 +392,8 @@ chain = create_translation_chain(input_data, [axiom], prov_manager=manager)
 print(chain.confidence)  # 0.92
 ```
 
+When a `prov_manager` is passed and the provenance record cannot be written, `apply()` raises `ProvenanceRecordingError` (from `semantica.utils`) rather than returning an unrecorded result, and `create_translation_chain()` lets it propagate. Pass `require_provenance=False` for best effort: the call then returns normally and the result carries `provenance_recorded` (`bool`) and `provenance_error` (`str` or `None`) so the caller can see whether the record was written.
+
 ## Integration with GraphBuilder
 
 `GraphBuilderWithProvenance` (from `semantica.kg`) automatically records provenance for every node and edge:
