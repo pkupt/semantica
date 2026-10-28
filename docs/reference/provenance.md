@@ -392,6 +392,35 @@ chain = create_translation_chain(input_data, [axiom], prov_manager=manager)
 print(chain.confidence)  # 0.92
 ```
 
+A coefficient alone does not say what it is expressed in, where it holds, or how spread out it is. Those are optional fields on `BridgeAxiom`, and an input outside the recorded window comes back flagged rather than silently extrapolated:
+
+```python
+axiom = BridgeAxiom(
+    axiom_id="BA-FINANCE-001",
+    name="biomass_tourism_elasticity",
+    rule="1% biomass increase -> 0.346% tourism revenue increase",
+    coefficient=0.346,
+    units="percent_change",
+    applicability_min=0.0,
+    applicability_max=10.0,
+    uncertainty=0.041,  # 1 sigma, same units as coefficient
+    source_doi="10.1038/s41586-021-03371-z",
+    source_page="Table S4",
+)
+
+inside = axiom.apply("biomass", 4.0)
+print(inside["extrapolated"])  # False
+print(inside["units"])  # percent_change
+
+outside = axiom.apply("biomass", 12.5)
+print(outside["extrapolated"])  # True
+print(outside["applicability_violations"])
+# ['input_value 12.5 is above applicability_max 10.0']
+print(outside["output_value"])  # still computed: 4.325
+```
+
+The output value is returned either way, because refusing an extrapolated number is a decision for the caller; `extrapolated` and `applicability_violations` are also written into the provenance record for the result. Bounds are inclusive, an inverted window raises `ValueError` at construction, and an axiom without a window never reports extrapolation.
+
 ## Integration with GraphBuilder
 
 `GraphBuilderWithProvenance` (from `semantica.kg`) automatically records provenance for every node and edge:

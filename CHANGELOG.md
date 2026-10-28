@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BridgeAxiom` records units, an applicability window and an uncertainty** (#2138) by @pkupt
+  - Optional `units`, `applicability_min`, `applicability_max` and `uncertainty` fields, all defaulting to `None` and appended after `metadata` so positional construction is unchanged. `__post_init__` rejects an inverted window and a negative uncertainty
+  - `apply()` returns `extrapolated` and `applicability_violations` alongside the result and writes both, with the window, units and uncertainty, into the provenance metadata. The output value is still computed when the input falls outside the window: refusing an extrapolated number is the caller's decision, so no number changes silently
+  - New `applicability_violations(input_value)` for callers that want the check without applying the axiom. Bounds are inclusive, and an axiom with no window never reports extrapolation
+
 - `DecisionRecorder` and `AgentContext` gain opt-in `evaluators`/`eval_config` constructor parameters that run `semantica.evals` evaluators (e.g. `decision_scores`) automatically during `record_decision()`, storing `eval_score`/`eval_passed`/`eval_details` in `Decision.metadata`. Fully backward-compatible: omitting `evaluators` leaves recording behavior unchanged. Evaluator failures are logged and never block decision persistence. Both the `graph_store` and `context_graph` `AgentContext` decision backends run the hook.
 - **Trust-tier grading of retrieved context** (#1703, phase 2 of #1557) by @pkupt
   - `ContextRetriever` now grades every retrieved fact on evidence quality and records the tier in `RetrievedContext.metadata["trust_tier"]` (`quarantine` / `bronze` / `silver` / `gold`). Tiers are computed at query time from signals already present in the result — graph node confidence and, when a `provenance_manager` is configured, the number of distinct sources from `get_all_sources` — and are never persisted, so grades stay current as source sets change

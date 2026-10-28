@@ -86,6 +86,12 @@ class BridgeAxiom:
         input_domain: Input domain (e.g., "ecological")
         output_domain: Output domain (e.g., "financial")
         metadata: Additional metadata
+        units: Unit or dimension the coefficient is expressed in, e.g.
+            "percent_change" or "ratio"
+        applicability_min: Lowest input value the source covers
+        applicability_max: Highest input value the source covers
+        uncertainty: Standard uncertainty (1 sigma) of the coefficient, in the
+            same units as the coefficient
     
     Examples:
         >>> # Blue Finance
@@ -133,6 +139,61 @@ class BridgeAxiom:
     input_domain: str = "unknown"
     output_domain: str = "unknown"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    units: Optional[str] = None
+    applicability_min: Optional[float] = None
+    applicability_max: Optional[float] = None
+    uncertainty: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        """
+        Reject bounds that cannot describe a window.
+
+        The point of moving these out of ``metadata`` is that they can be
+        checked; an inverted window would otherwise silently report every
+        input as out of range, or none of them.
+        """
+        if (
+            self.applicability_min is not None
+            and self.applicability_max is not None
+            and self.applicability_min > self.applicability_max
+        ):
+            raise ValueError(
+                f"applicability_min ({self.applicability_min}) is greater than "
+                f"applicability_max ({self.applicability_max})"
+            )
+        if self.uncertainty is not None and self.uncertainty < 0:
+            raise ValueError(
+                f"uncertainty must not be negative, got {self.uncertainty}"
+            )
+
+    def applicability_violations(self, input_value: float) -> List[str]:
+        """
+        Return the ways ``input_value`` falls outside the applicability window.
+
+        An empty list means the input is inside the range the source actually
+        covered, or that no window was recorded. Extrapolation is reported
+        this way instead of raising, because a value outside the window is
+        still a usable translation. The caller decides whether to report it,
+        widen the window, or refuse the result.
+        """
+        violations: List[str] = []
+        if (
+            self.applicability_min is not None
+            and input_value < self.applicability_min
+        ):
+            violations.append(
+                f"input_value {input_value} is below applicability_min "
+                f"{self.applicability_min}"
+            )
+        if (
+            self.applicability_max is not None
+            and input_value > self.applicability_max
+        ):
+            violations.append(
+                f"input_value {input_value} is above applicability_max "
+                f"{self.applicability_max}"
+            )
+        return violations
     
     def apply(
         self,
@@ -151,8 +212,12 @@ class BridgeAxiom:
             **kwargs: Additional parameters
             
         Returns:
-            Dictionary with result and provenance information
-            
+            Dictionary with result and provenance information. When the axiom
+            records an applicability window, ``extrapolated`` says whether the
+            input fell outside it and ``applicability_violations`` lists which
+            bound was crossed, so a caller can report or reject the result
+            instead of carrying an extrapolated number along the chain.
+
         Example:
             >>> result = ba.apply(
             ...     input_entity="cabo_pulmo_biomass",
@@ -164,6 +229,9 @@ class BridgeAxiom:
         """
         # Calculate output value
         output_value = input_value * self.coefficient
+
+        violations = self.applicability_violations(input_value)
+        extrapolated = bool(violations)
         
         # Generate output entity ID
         output_entity = f"{input_entity}_transformed_{self.axiom_id}"
@@ -190,6 +258,12 @@ class BridgeAxiom:
                         "output_value": output_value,
                         "input_domain": self.input_domain,
                         "output_domain": self.output_domain,
+                        "units": self.units,
+                        "uncertainty": self.uncertainty,
+                        "applicability_min": self.applicability_min,
+                        "applicability_max": self.applicability_max,
+                        "extrapolated": extrapolated,
+                        "applicability_violations": violations,
                         **kwargs
                     }
                 )
@@ -208,7 +282,13 @@ class BridgeAxiom:
             "source_doi": self.source_doi,
             "source_page": self.source_page,
             "input_domain": self.input_domain,
-            "output_domain": self.output_domain
+            "output_domain": self.output_domain,
+            "units": self.units,
+            "uncertainty": self.uncertainty,
+            "applicability_min": self.applicability_min,
+            "applicability_max": self.applicability_max,
+            "extrapolated": extrapolated,
+            "applicability_violations": violations,
         }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -224,7 +304,11 @@ class BridgeAxiom:
             "confidence": self.confidence,
             "input_domain": self.input_domain,
             "output_domain": self.output_domain,
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "units": self.units,
+            "applicability_min": self.applicability_min,
+            "applicability_max": self.applicability_max,
+            "uncertainty": self.uncertainty,
         }
 
 
