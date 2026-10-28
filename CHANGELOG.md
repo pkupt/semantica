@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Failed identical-input BridgeAxiom retries could report provenance as recorded** (fixes #2154)
+  - `ProvenanceManager.track_entity()` now accepts keyword-only `raise_on_error=True` to propagate the original tracking or transaction exception after rollback. Its default still returns `None` for a failed new write or a copy of the previous entry for a failed update; shared transactions and batch savepoints retain their existing behavior.
+  - `BridgeAxiom.apply()` requests strict tracking from `ProvenanceManager` and retains the missing-entry/metadata-mismatch guard for older overrides. Subclasses must honor strict tracking for identical-input failure detection; matching metadata alone does not prove persistence. Required mode raises `ProvenanceRecordingError` with the original cause; best-effort mode reports the failure. Public errors still expose only the exception type, and duck-typed legacy managers retain their existing contract.
+
 - **`DomainOntologies` advertised legal, research and cybersecurity templates that did not exist** (fixes #1819) by @pkupt
   - `get_domain_template("legal")`, `("research")` and `("cybersecurity")` returned a bare `None`, which surfaced in caller code as `AttributeError: 'NoneType' object has no attribute 'get'`. The three templates are now registered, in the same small hand-written style as `healthcare` and `finance`.
   - `get_domain_template` still returns `None` for an unregistered domain, but now logs a warning listing the available domains so the miss is visible. New `tests/ontology/test_domain_ontologies.py`
