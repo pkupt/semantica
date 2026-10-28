@@ -31,7 +31,9 @@ if sys.platform == "win32":
     if sys.stderr is not None and hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import ast
 from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Iterator, List,
@@ -57,10 +59,15 @@ if TYPE_CHECKING:
     from .core.orchestrator import Semantica
 
 console = Console()
+# --json reserves stdout for the machine-readable payload, so warnings go
+# here instead. See the --json promise in the CLI context setup below.
+err_console = Console(stderr=True)
 
-# Supported interpreter range: ``requires-python = ">=3.10,<3.14"`` in
+# Supported interpreter range: ``requires-python = ">=3.11,<3.14"`` in
 # pyproject.toml. tests/test_python_support_policy.py fails if the two drift.
-MIN_PYTHON = (3, 10)
+# 3.10 was dropped in 0.8.0: it is past end of life and Pillow 13, which has
+# the security fixes 12.x lacks, needs 3.11 (#2067).
+MIN_PYTHON = (3, 11)
 MAX_PYTHON_EXCLUSIVE = (3, 14)
 
 
@@ -654,8 +661,9 @@ def main(
         # Reinitialize the module-level console if --no-color was requested so
         # all subsequent console.print() calls in this invocation respect the flag.
         if no_color:
-            global console  # noqa: PLW0603
+            global console, err_console  # noqa: PLW0603
             console = Console(no_color=True)
+            err_console = Console(stderr=True, no_color=True)
         ctx.obj = CLIContext(
             config_path=_resolve_config_path(config_path),
             config=config,
@@ -1755,7 +1763,10 @@ def _info(cli_ctx: CLIContext, text: str) -> None:
 
 
 def _warn(cli_ctx: CLIContext, text: str) -> None:
-    console.print(f"[{_WARN_STY}] ⚠[/{_WARN_STY}] {text}")
+    # Under --json the payload owns stdout, so the warning goes to stderr and
+    # the output stays one parseable document.
+    stream = err_console if cli_ctx.json_output else console
+    stream.print(f"[{_WARN_STY}] ⚠[/{_WARN_STY}] {text}")
 
 
 def _dry(cli_ctx: CLIContext, action: str, *, json_out: bool = False, **fields: Any) -> None:
@@ -3680,13 +3691,88 @@ def temporal(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
+def _load_temporal_kg(cli_ctx: CLIContext) -> Dict[str, Any]:
+    """Load the CLI's persisted graph in the ``{"entities", "relationships"}``
+    shape the temporal engines consume."""
+    if not _uses_memory_graph(cli_ctx):
+        raise click.ClickException(
+            "The temporal commands read the CLI's persisted memory-backend "
+            "graph and are not wired for the "
+            f"{_resolve_graph_backend(cli_ctx)!r} backend yet."
+        )
+    from .kg.temporal_model import parse_temporal_value
+
+    graph = _load_context_graph(cli_ctx).to_kg_dict()
+    # The export keeps ``recorded_at`` inside properties/metadata, but the
+    # temporal engines read temporal fields at the fact's top level. Lift it
+    # (normalised to UTC) so a fact recorded without explicit validity dates
+    # still has a history event.
+    for fact in (*graph.get("entities", []), *graph.get("relationships", [])):
+        if "recorded_at" in fact:
+            continue
+        recorded_at = (fact.get("properties") or {}).get("recorded_at") or (
+            fact.get("metadata") or {}
+        ).get("recorded_at")
+        parsed = parse_temporal_value(recorded_at) if recorded_at is not None else None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            fact["recorded_at"] = parsed.isoformat()
+    return graph
+
+
+def _parse_allen_interval(spec: str) -> Any:
+    """Parse a ``start/end`` interval spec into a ``TemporalInterval``.
+
+    Values keep their exact precision instead of being normalised to a
+    granularity: expanding the end to the last microsecond of its second (as
+    ``normalize_interval`` does) makes an end that equals the next interval's
+    start report ``overlaps`` where Allen algebra says ``meets``.
+    """
+    from .kg.temporal_model import (
+        TemporalBound,
+        parse_temporal_bound,
+        parse_temporal_value,
+    )
+    from .kg.temporal_reasoning import TemporalInterval
+
+    parts = spec.split("/", 1)
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        raise click.ClickException(
+            f"Interval must be given as start/end, got: {spec!r}"
+        )
+    start = parse_temporal_value(parts[0].strip())
+    if start is None:
+        raise click.ClickException(f"Invalid interval start: {parts[0].strip()!r}")
+    end: Any = parse_temporal_bound(parts[1].strip(), default=TemporalBound.OPEN)
+    if end is not TemporalBound.OPEN:
+        end = parse_temporal_value(end)
+        if end is None:
+            raise click.ClickException(f"Invalid interval end: {parts[1].strip()!r}")
+    # Keep naive values comparable with aware ones inside relation().
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if isinstance(end, datetime) and end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if isinstance(end, datetime) and end < start:
+        raise click.ClickException(f"Interval end precedes its start: {spec!r}")
+    return TemporalInterval(start=start, end=end)
+
+
 @temporal.command("snapshot")
 @click.option("--at", "at_time", required=True, help="ISO 8601 datetime.")
-@click.option("--format", "fmt", type=click.Choice(["json", "table"]),
-              default="json", show_default=True)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["json", "table"]),
+    default="json",
+    show_default=True,
+)
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def temporal_snapshot(cli_ctx: CLIContext, at_time: str, fmt: str, local_json: bool) -> None:
+def temporal_snapshot(
+    cli_ctx: CLIContext, at_time: str, fmt: str, local_json: bool
+) -> None:
     """Graph state at a specific point in time.
 
     \b
@@ -3698,10 +3784,13 @@ def temporal_snapshot(cli_ctx: CLIContext, at_time: str, fmt: str, local_json: b
     def _action() -> None:
         try:
             from .kg import TemporalGraphQuery
-            tgq = TemporalGraphQuery(config=cli_ctx.config.to_dict())
-            result = tgq.snapshot(at=at_time)
         except ImportError as exc:
-            raise click.ClickException(f"KG temporal module not available: {exc}") from exc
+            raise click.ClickException(
+                f"KG temporal module not available: {exc}"
+            ) from exc
+        graph = _load_temporal_kg(cli_ctx)
+        tgq = TemporalGraphQuery()
+        result = tgq.reconstruct_at_time(graph, at_time)
         if _is_json(cli_ctx, local_json) or fmt == "json":
             _jecho(result if isinstance(result, dict) else {"snapshot": str(result)})
         else:
@@ -3712,21 +3801,41 @@ def temporal_snapshot(cli_ctx: CLIContext, at_time: str, fmt: str, local_json: b
 
 @temporal.command("query")
 @click.argument("query_str")
+@click.option(
+    "--at",
+    "at_time",
+    default=None,
+    help="ISO 8601 datetime to query at (defaults to the current time).",
+)
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def temporal_query(cli_ctx: CLIContext, query_str: str, local_json: bool) -> None:
-    """Temporal-aware graph query."""
+def temporal_query(
+    cli_ctx: CLIContext, query_str: str, at_time: Optional[str], local_json: bool
+) -> None:
+    """Temporal-aware graph query.
+
+    \b
+    Note: the query string is reserved for future query parsing; the result is
+    currently the graph slice valid at --at regardless of its content.
+    """
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
         try:
             from .kg import TemporalGraphQuery
-            tgq = TemporalGraphQuery(config=cli_ctx.config.to_dict())
-            result = tgq.query(query_str)
         except ImportError as exc:
-            raise click.ClickException(f"KG temporal module not available: {exc}") from exc
+            raise click.ClickException(
+                f"KG temporal module not available: {exc}"
+            ) from exc
+        graph = _load_temporal_kg(cli_ctx)
+        tgq = TemporalGraphQuery()
+        result = tgq.query_at_time(
+            graph, query_str, at_time or datetime.now(timezone.utc)
+        )
         if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, (dict, list)) else {"result": str(result)})
+            _jecho(
+                result if isinstance(result, (dict, list)) else {"result": str(result)}
+            )
         else:
             _pprint(cli_ctx, result)
 
@@ -3739,8 +3848,13 @@ def temporal_query(cli_ctx: CLIContext, query_str: str, local_json: bool) -> Non
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def temporal_history(cli_ctx: CLIContext, entity_id: str, since: Optional[str],
-                     fmt: str, local_json: bool) -> None:
+def temporal_history(
+    cli_ctx: CLIContext,
+    entity_id: str,
+    since: Optional[str],
+    fmt: str,
+    local_json: bool,
+) -> None:
     """Change history for an entity.
 
     \b
@@ -3751,39 +3865,84 @@ def temporal_history(cli_ctx: CLIContext, entity_id: str, since: Optional[str],
 
     def _action() -> None:
         try:
-            from .kg import TemporalVersionManager
-            tvm = TemporalVersionManager(config=cli_ctx.config.to_dict())
-            result = tvm.history(entity_id, since=since)
+            from .kg.temporal_reasoning import TemporalReasoningEngine
+            from .kg.temporal_model import (
+                parse_temporal_value,
+                temporal_structure_to_json_ready,
+            )
         except ImportError as exc:
-            raise click.ClickException(f"KG temporal module not available: {exc}") from exc
+            raise click.ClickException(
+                f"KG temporal module not available: {exc}"
+            ) from exc
+        graph = _load_temporal_kg(cli_ctx)
+        events = TemporalReasoningEngine().timeline_of(entity_id, graph)
+        if since:
+            since_dt = parse_temporal_value(since)
+            if since_dt is not None:
+                if since_dt.tzinfo is None:
+                    since_dt = since_dt.replace(tzinfo=timezone.utc)
+
+                def _aware(ts: datetime) -> datetime:
+                    return (
+                        ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+                    )
+
+                events = [
+                    event for event in events if _aware(event["timestamp"]) >= since_dt
+                ]
+        # Serialize through the kg temporal helpers so timestamps are ISO 8601
+        # in every output mode, consistent with `temporal distance`, instead of
+        # the space-separated str() form json.dumps(default=str) produces.
+        ready = temporal_structure_to_json_ready(
+            events if isinstance(events, list) else []
+        )
         if _is_json(cli_ctx, local_json) or fmt == "json":
-            _jecho(result if isinstance(result, list) else [])
+            _jecho(ready)
         else:
-            _pprint(cli_ctx, result)
+            _pprint(cli_ctx, ready)
 
     _run_with_error_handling(_action)
 
 
 @temporal.command("distance")
-@click.option("--event1", required=True)
-@click.option("--event2", required=True)
-@click.option("--history", is_flag=True, default=False)
+@click.option("--event1", required=True, help="First timestamp (ISO 8601).")
+@click.option("--event2", required=True, help="Second timestamp (ISO 8601).")
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def temporal_distance(cli_ctx: CLIContext, event1: str, event2: str,
-                      history: bool, local_json: bool) -> None:
-    """Temporal distance between two events."""
+def temporal_distance(
+    cli_ctx: CLIContext, event1: str, event2: str, local_json: bool
+) -> None:
+    """Temporal distance between two timestamps."""
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
         try:
-            from .kg import TemporalGraphQuery
-            tgq = TemporalGraphQuery(config=cli_ctx.config.to_dict())
-            result = tgq.distance(event1, event2, include_history=history)
+            from .kg.temporal_model import parse_temporal_value
         except ImportError as exc:
-            raise click.ClickException(f"KG temporal module not available: {exc}") from exc
+            raise click.ClickException(
+                f"KG temporal module not available: {exc}"
+            ) from exc
+        # Exact values, not a granularity: rounding to whole seconds first
+        # collapses any distance smaller than a second to zero.
+        t1 = parse_temporal_value(event1)
+        t2 = parse_temporal_value(event2)
+        if t1 is None or t2 is None:
+            raise click.ClickException(
+                f"Could not parse timestamp(s): {event1!r}, {event2!r}"
+            )
+        if t1.tzinfo is None:
+            t1 = t1.replace(tzinfo=timezone.utc)
+        if t2.tzinfo is None:
+            t2 = t2.replace(tzinfo=timezone.utc)
+        seconds = abs((t2 - t1).total_seconds())
+        result = {
+            "event1": t1.isoformat(),
+            "event2": t2.isoformat(),
+            "distance_seconds": seconds,
+            "distance_days": seconds / 86400,
+        }
         if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, dict) else {"distance": str(result)})
+            _jecho(result)
         else:
             _pprint(cli_ctx, result)
 
@@ -3791,26 +3950,42 @@ def temporal_distance(cli_ctx: CLIContext, event1: str, event2: str,
 
 
 @temporal.command("allen")
-@click.option("--interval1", required=True)
-@click.option("--interval2", required=True)
+@click.option(
+    "--interval1", required=True, help="First interval as start/end (ISO 8601)."
+)
+@click.option(
+    "--interval2", required=True, help="Second interval as start/end (ISO 8601)."
+)
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def temporal_allen(cli_ctx: CLIContext, interval1: str, interval2: str,
-                   local_json: bool) -> None:
+def temporal_allen(
+    cli_ctx: CLIContext, interval1: str, interval2: str, local_json: bool
+) -> None:
     """Allen interval algebra relation between two intervals."""
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
         try:
-            from .reasoning import TemporalReasoningEngine
-            engine = TemporalReasoningEngine(config=cli_ctx.config.to_dict())
-            result = engine.allen_relation(interval1, interval2)
+            from .kg.temporal_reasoning import TemporalReasoningEngine
         except ImportError as exc:
-            raise click.ClickException(f"Reasoning module not available: {exc}") from exc
+            raise click.ClickException(
+                f"Reasoning module not available: {exc}"
+            ) from exc
+        engine = TemporalReasoningEngine()
+        iv1 = _parse_allen_interval(interval1)
+        iv2 = _parse_allen_interval(interval2)
+        relation = engine.relation(iv1, iv2)
+        relation_name = relation.value if hasattr(relation, "value") else str(relation)
         if _is_json(cli_ctx, local_json):
-            _jecho({"interval1": interval1, "interval2": interval2, "relation": str(result)})
+            _jecho(
+                {
+                    "interval1": interval1,
+                    "interval2": interval2,
+                    "relation": relation_name,
+                }
+            )
         else:
-            console.print(f"{interval1} ── {result} ──► {interval2}")
+            console.print(f"{interval1} ── {relation_name} ──► {interval2}")
 
     _run_with_error_handling(_action)
 
@@ -4686,14 +4861,115 @@ _viz_command("analytics", "visualize_analytics", "Render centrality and communit
 # ─── Orchestration ────────────────────────────────────────────────────────────
 
 
+# Must stay in step with PipelineTemplateManager.list_templates(). The CLI used to
+# offer five names the manager has never registered, so every `pipeline init`
+# reached "Template not found" once the wrapper called the real API. Pinned by
+# tests/test_cli_commands.py::TestPipeline::test_init_templates_match_the_manager.
 _PIPELINE_TEMPLATES = [
-    "ingest-extract-kg", "rag", "ontology-build", "decision-track", "full",
+    "document_processing", "rag_pipeline", "kg_construction", "ontology_generation",
 ]
+
+
+class PipelineFileError(click.ClickException):
+    """A pipeline file that parses but is not a usable pipeline definition.
+
+    ``errors`` keeps the per-entry messages so ``--json`` can report each
+    offending entry instead of one flattened sentence.
+    """
+
+    def __init__(self, message: str, errors: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.errors = list(errors) if errors else [message]
+
+
+def _pipeline_step_errors(payload: Dict[str, Any]) -> List[str]:
+    """Return an error for every step ``PipelineBuilder`` would silently drop.
+
+    ``PipelineBuilder.build_pipeline`` keeps a step only when both ``name`` and
+    ``type`` are truthy (``pipeline_builder.py`` — ``if step_name and
+    step_type``). Every other entry disappears before the validator sees it, so
+    a partly malformed file used to be reported valid. Check the shape here,
+    while the offending index is still known.
+    """
+    steps = payload.get("steps", [])
+    if steps is None:
+        steps = []
+    if not isinstance(steps, list):
+        return [f"'steps' must be a list, got {type(steps).__name__}"]
+    errors: List[str] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            errors.append(
+                f"steps[{index}] is not a mapping (got {type(step).__name__})"
+            )
+            continue
+        label = f"steps[{index}]"
+        name = step.get("name")
+        if isinstance(name, str) and name.strip():
+            label += f" ('{name}')"
+        for field_name in ("name", "type"):
+            value = step.get(field_name)
+            if not (isinstance(value, str) and value.strip()):
+                errors.append(
+                    f"{label} is missing a non-empty '{field_name}'"
+                )
+    return errors
+
+
+def _pipeline_builder_error_messages(exc: BaseException) -> List[str]:
+    """Split the builder's ``Pipeline validation failed: [...]`` message.
+
+    ``PipelineBuilder.build_pipeline`` raises one ``ValidationError`` whose
+    message embeds the list of validation errors as a Python literal, so a
+    ``--json`` caller that only got that string would have to parse it back.
+    """
+    detail = str(exc)
+    prefix = "Pipeline validation failed: "
+    if detail.startswith(prefix):
+        detail = detail[len(prefix):]
+    if detail.startswith("[") and detail.endswith("]"):
+        try:
+            parsed = ast.literal_eval(detail)
+        except (ValueError, SyntaxError):
+            return [detail]
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed]
+    return [detail]
+
+
+def _load_pipeline_file(path: str) -> Any:
+    """Load a pipeline config file into a ``Pipeline`` object.
+
+    Accepts YAML, or JSON (which ``yaml.safe_load`` parses as a subset). Step
+    handlers are process-local and are never restored from a file, so every step
+    of a loaded pipeline has ``handler is None`` — see
+    ``PipelineSerializer.deserialize_pipeline``.
+    """
+    try:
+        from .pipeline import PipelineSerializer
+    except ImportError as exc:
+        raise click.ClickException(f"Pipeline module not available: {exc}") from exc
+    try:
+        payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise click.ClickException(f"Could not parse {path} as YAML: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise PipelineFileError(
+            f"{path} is not a pipeline definition: expected a mapping with a "
+            f"'steps' list, got {type(payload).__name__}."
+        )
+    step_errors = _pipeline_step_errors(payload)
+    if step_errors:
+        raise PipelineFileError(
+            f"{path} is not a valid pipeline definition: " + "; ".join(step_errors),
+            errors=step_errors,
+        )
+    return PipelineSerializer().deserialize_pipeline(payload)
 
 
 @pipeline.command("init")
 @click.option("--template", type=click.Choice(_PIPELINE_TEMPLATES),
-              default="ingest-extract-kg", show_default=True)
+              default="document_processing", show_default=True)
 @click.option("--output", default="pipeline.yaml", show_default=True, type=click.Path())
 @click.option("--dry-run", "local_dry", is_flag=True, default=False)
 @click.pass_obj
@@ -4702,7 +4978,7 @@ def pipeline_init(cli_ctx: CLIContext, template: str, output: str, local_dry: bo
 
     \b
     Example:
-      semantica pipeline init --template ingest-extract-kg --output pipeline.yaml
+      semantica pipeline init --template document_processing --output pipeline.yaml
     """
     cli_ctx = _require_ctx(cli_ctx)
 
@@ -4711,12 +4987,18 @@ def pipeline_init(cli_ctx: CLIContext, template: str, output: str, local_dry: bo
             _dry(cli_ctx, "init pipeline", template=template, output=output)
             return
         try:
-            from .pipeline import PipelineTemplateManager
-            mgr = PipelineTemplateManager()
-            content = mgr.scaffold(template)
-        except ImportError:
-            content = f"# Pipeline template: {template}\nsteps: []\n"
-        Path(output).write_text(content, encoding="utf-8")
+            from .pipeline import PipelineSerializer, PipelineTemplateManager
+        except ImportError as exc:
+            raise click.ClickException(f"Pipeline module not available: {exc}") from exc
+        builder = PipelineTemplateManager().create_pipeline_from_template(template)
+        # serialize_pipeline(..., format="yaml") returns the dict form rather than
+        # a YAML string, so the dump happens here.
+        payload = PipelineSerializer().serialize_pipeline(
+            builder.build(), format="yaml",
+        )
+        Path(output).write_text(
+            yaml.safe_dump(payload, sort_keys=False), encoding="utf-8",
+        )
         _ok(cli_ctx, f"Created {output} from template '{template}'")
 
     _run_with_error_handling(_action)
@@ -4731,16 +5013,75 @@ def pipeline_validate(cli_ctx: CLIContext, pipeline_file: str, local_json: bool)
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
+        # --json promises its own {valid, errors, warnings, pipeline} object, so a
+        # file the loader (or the builder inside it) rejects must still be reported
+        # in that shape instead of falling through to the generic error envelope.
+        json_mode = _is_json(cli_ctx, local_json)
+        errors: List[str] = []
+        warnings_found: List[str] = []
+        pipeline = None
         try:
-            from .pipeline import PipelineValidator
-            v = PipelineValidator()
-            result = v.validate(pipeline_file)
-        except ImportError as exc:
-            raise click.ClickException(f"Pipeline module not available: {exc}") from exc
-        if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, dict) else {"valid": bool(result)})
+            pipeline = _load_pipeline_file(pipeline_file)
+        except PipelineFileError as exc:
+            if not json_mode:
+                raise
+            errors = exc.errors
+        except click.ClickException as exc:
+            if not json_mode:
+                raise
+            errors = [str(exc.format_message())]
+        except SemanticaError as exc:  # the builder rejected the payload
+            if not json_mode:
+                raise
+            errors = _pipeline_builder_error_messages(exc)
+        except Exception as exc:  # malformed in some way we did not anticipate
+            if not json_mode:
+                raise
+            errors = [str(exc)]
+
+        if pipeline is not None:
+            try:
+                from .pipeline import PipelineValidator
+            except ImportError as exc:
+                raise click.ClickException(
+                    f"Pipeline module not available: {exc}"
+                ) from exc
+            # The old wrapper passed the file path straight to validate(). A str has
+            # no steps, so it type-checked nothing and reported valid for any input.
+            result = PipelineValidator().validate(pipeline)
+            errors = [str(e) for e in (getattr(result, "errors", None) or [])]
+            warnings_found = [
+                str(w) for w in (getattr(result, "warnings", None) or [])
+            ]
+            valid = bool(getattr(result, "valid", False))
         else:
-            _ok(cli_ctx, f"Pipeline config valid: {pipeline_file}")
+            valid = False
+
+        if json_mode:
+            _jecho({
+                "valid": valid,
+                "errors": errors,
+                "warnings": warnings_found,
+                "pipeline": pipeline_file,
+            })
+            if not valid:
+                # Text mode already exits non-zero on an invalid file; JSON mode
+                # used to return 0, so callers had to parse the body to notice.
+                raise SystemExit(1)
+            return
+
+        if not valid:
+            for err in errors:
+                _warn(cli_ctx, err)
+            raise click.ClickException(
+                f"Pipeline config invalid: {pipeline_file} "
+                f"({len(errors)} error(s), {len(warnings_found)} warning(s))"
+            )
+        _ok(
+            cli_ctx,
+            f"Pipeline config valid: {pipeline_file} "
+            f"({len(warnings_found)} warning(s))",
+        )
 
     _run_with_error_handling(_action)
 
@@ -4769,16 +5110,52 @@ def pipeline_run(cli_ctx: CLIContext, pipeline_file: str, parallel: int,
         if _is_dry(cli_ctx, local_dry):
             _dry(cli_ctx, "run pipeline", file=pipeline_file, parallel=parallel)
             return
+        if watch:
+            raise click.ClickException(
+                "--watch has no implementation in the execution engine yet; "
+                "re-run the pipeline after each change instead."
+            )
+        pipeline = _load_pipeline_file(pipeline_file)
+        # _execute_step() returns its input untouched when step.handler is None, so
+        # an all-unhandled pipeline "succeeds" having done nothing. Refuse instead
+        # of reporting a green no-op.
+        unhandled = [
+            step.name for step in pipeline.steps
+            if getattr(step, "handler", None) is None
+        ]
+        if unhandled:
+            raise click.ClickException(
+                f"Cannot execute {pipeline_file}: {len(unhandled)} step(s) have no "
+                f"handler ({', '.join(unhandled)}). Step handlers are Python "
+                "callables and are never restored from a config file, so the engine "
+                "would pass data through every step and still report success. "
+                "Register them with PipelineBuilder.register_step_handler() and run "
+                "the pipeline in Python, or use `semantica pipeline validate` to "
+                "check the config."
+            )
+        # --parallel and --incremental have no run-level switch in the engine:
+        # parallelism is read from pipeline.config and delta mode is per step.
+        pipeline.config["parallelism"] = parallel
+        if incremental:
+            for step in pipeline.steps:
+                step.delta_mode = True
         try:
             from .pipeline import ExecutionEngine
-            engine = ExecutionEngine(config=cli_ctx.config.to_dict())
-            result = engine.run(
-                pipeline_file, workers=parallel,
-                incremental=incremental, watch=watch,
-            )
         except ImportError as exc:
             raise click.ClickException(f"Pipeline module not available: {exc}") from exc
-        _ok(cli_ctx, f"Pipeline completed: {result}")
+        engine = ExecutionEngine(config=cli_ctx.config.to_dict())
+        result = engine.execute_pipeline(pipeline)
+        if not result.success:
+            errors = [str(e) for e in (result.errors or [])]
+            raise click.ClickException(
+                f"Pipeline failed: {'; '.join(errors) if errors else 'no error detail'}"
+            )
+        elapsed = result.metadata.get("execution_time")
+        pipeline_id = result.metadata.get("pipeline_id", pipeline.name)
+        summary = f"Pipeline completed: {pipeline_id}"
+        if isinstance(elapsed, (int, float)):
+            summary += f" in {elapsed:.2f}s"
+        _ok(cli_ctx, summary)
 
     _run_with_error_handling(_action)
 
@@ -4791,16 +5168,16 @@ def pipeline_status(cli_ctx: CLIContext, local_json: bool) -> None:
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
-        try:
-            from .pipeline import ExecutionEngine
-            engine = ExecutionEngine(config=cli_ctx.config.to_dict())
-            result = engine.status()
-        except ImportError as exc:
-            raise click.ClickException(f"Pipeline module not available: {exc}") from exc
-        if _is_json(cli_ctx, local_json):
-            _jecho(result if isinstance(result, dict) else {"status": str(result)})
-        else:
-            _pprint(cli_ctx, result)
+        # ExecutionEngine.pipeline_status is an in-memory dict and
+        # get_pipeline_status() only reads it, so a pipeline started by another
+        # process is invisible here. There is no id to accept either: ids are
+        # pipeline.name and are never persisted.
+        raise click.ClickException(
+            "`pipeline status` has no source of truth: the execution engine keeps "
+            "pipeline status in memory, so a pipeline started by a separate "
+            "`semantica pipeline run` process cannot be observed from here. Track it "
+            "in the process that called ExecutionEngine.execute_pipeline() instead."
+        )
 
     _run_with_error_handling(_action)
 
@@ -4812,13 +5189,17 @@ def pipeline_stop(cli_ctx: CLIContext) -> None:
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
-        try:
-            from .pipeline import ExecutionEngine
-            engine = ExecutionEngine(config=cli_ctx.config.to_dict())
-            engine.stop()
-        except ImportError as exc:
-            raise click.ClickException(f"Pipeline module not available: {exc}") from exc
-        _ok(cli_ctx, "Pipeline stopped.")
+        # stop_pipeline() does set a flag the run loop honours (execution_engine.py
+        # :273 and :320), but it takes a pipeline id and that flag lives on the
+        # engine instance doing the stopping, so it cannot reach a pipeline owned by
+        # another process.
+        raise click.ClickException(
+            "`pipeline stop` has nothing to stop: the execution engine tracks running "
+            "pipelines in memory only, so a pipeline started by a separate "
+            "`semantica pipeline run` process is not reachable from here. Call "
+            "ExecutionEngine.stop_pipeline(pipeline_id) in the process running the "
+            "pipeline instead."
+        )
 
     _run_with_error_handling(_action)
 
@@ -5102,9 +5483,15 @@ def _collect_backup_sources(
     config_path: Optional[str],
     include: str,
     strip_config: bool,
-) -> List[Tuple[str, Path]]:
-    """Return (arcname, local_path) pairs for local files to include in a backup."""
+) -> Tuple[List[Tuple[str, Path]], List[Dict[str, str]]]:
+    """Return (arcname, local_path) pairs for local files to include in a backup.
+
+    Also returns each configured store whose local path does not exist or holds
+    no files, so the caller can report it instead of writing a partial archive
+    with no sign that a store was dropped (#2009, #2014).
+    """
     sources: List[Tuple[str, Path]] = []
+    skipped: List[Dict[str, str]] = []
 
     if not strip_config and include in ("config", "all"):
         candidates: List[str] = [c for c in [config_path, "semantica.yaml", "semantica.yml"] if c]
@@ -5120,11 +5507,26 @@ def _collect_backup_sources(
         if ont_path:
             p = Path(ont_path)
             if p.is_dir():
+                before = len(sources)
                 for f in p.rglob("*"):
                     if f.is_file():
                         sources.append((f"ontology/{f.relative_to(p)}", f))
+                if len(sources) == before:
+                    # An existing-but-empty directory contributed nothing; report
+                    # it instead of dropping it silently (#2014).
+                    skipped.append({
+                        "store": "ontology",
+                        "backend": "file",
+                        "path": _redact(ont_path),
+                    })
             elif p.is_file():
                 sources.append((f"ontology/{p.name}", p))
+            else:
+                skipped.append({
+                    "store": "ontology",
+                    "backend": "file",
+                    "path": _redact(ont_path),
+                })
 
     store_map = {"graph": "graph_db", "vector": "vector_store", "triplet": "triplet_store"}
     for store_type, cfg_key in store_map.items():
@@ -5137,16 +5539,84 @@ def _collect_backup_sources(
         _dp: Any = info.get("path") or info.get("data_path") or info.get("index_path")
         data_path: Optional[str] = str(_dp) if _dp else None
         if not data_path:
+            # No local path key at all: a cloud/database backend, which
+            # `backup info` reports as not file-copyable. Not a skip.
             continue
         p = Path(data_path)
         if p.is_dir():
+            before = len(sources)
             for f in p.rglob("*"):
                 if f.is_file():
                     sources.append((f"{store_type}/{f.relative_to(p)}", f))
+            if len(sources) == before:
+                # Same reporting rule as a missing path: an empty directory
+                # yields no files, so the store would vanish from the archive
+                # with no sign of it (#2014).
+                skipped.append({
+                    "store": store_type,
+                    "backend": str(info.get("backend", "unknown")),
+                    "path": _redact(data_path),
+                })
         elif p.is_file():
             sources.append((f"{store_type}/{p.name}", p))
+        else:
+            # Redacted: this is shown in a warning and written to the
+            # manifest, even with --strip-config.
+            skipped.append({
+                "store": store_type,
+                "backend": str(info.get("backend", "unknown")),
+                "path": _redact(data_path),
+            })
 
-    return sources
+    return sources, skipped
+
+
+def _skip_label(store: str) -> str:
+    """Human label for a skipped entry, without calling ontology a 'store'."""
+    return "ontology" if store == "ontology" else f"{store} store"
+
+
+def _warn_skipped(cli_ctx: CLIContext, skipped: List[Dict[str, str]]) -> None:
+    """Name every configured path that contributed no files (#2009, #2014)."""
+    for entry in skipped:
+        _warn(
+            cli_ctx,
+            f"Skipping {_skip_label(entry['store'])} ({entry['backend']}): "
+            f"path does not exist or contains no files: {entry['path']}",
+        )
+
+
+def _raise_on_no_store_data(sources: List[Tuple[str, Path]], include: str) -> None:
+    """Refuse a backup that would hold no store data at all (#1820).
+
+    Called by the real command and by its dry run alike: a preview that
+    reports success for an archive the real command refuses to write is the
+    same surprise as a successful backup with nothing in it (#2122).
+    """
+    if include not in ("graph", "vector", "triplet", "all"):
+        return
+    if any(arcname.startswith(("graph/", "vector/", "triplet/"))
+           for arcname, _ in sources):
+        return
+    stores = "graph, vector and triplet stores" if include == "all" else f"{include} store"
+    raise click.ClickException(
+        f"No store data to back up: found no local files for the {stores}. "
+        "backup create only copies file-based stores (a graph_db / vector_store / "
+        "triplet_store path that exists on disk); run `semantica backup info` "
+        "to see how to back up other backends."
+    )
+
+
+def _raise_on_skipped(skipped: List[Dict[str, str]], *, target: str) -> None:
+    """Raise the --fail-on-skip error naming every skipped path."""
+    if not skipped:
+        return
+    missing = ", ".join(f"{e['store']} ({e['path']})" for e in skipped)
+    raise click.ClickException(
+        f"Configured store path does not exist or contains no files: {missing}. "
+        f"Nothing from those stores would be {target}; create the path, drop it "
+        "from the config, or omit --fail-on-skip to continue with the rest."
+    )
 
 
 def _redact(uri: str) -> str:
@@ -5214,13 +5684,15 @@ def backup_info(cli_ctx: CLIContext, local_json: bool) -> None:
               help="Read passphrase from file (must not be world-readable).")
 @click.option("--strip-config", is_flag=True, default=False,
               help="Exclude semantica.yaml to avoid storing credentials at rest.")
+@click.option("--fail-on-skip", is_flag=True, default=False,
+              help="Exit non-zero when a configured store path is missing or empty.")
 @click.option("--dry-run", "local_dry", is_flag=True, default=False)
 @click.option("--quiet", "local_quiet", is_flag=True, default=False)
 @click.pass_obj
 def backup_create(
     cli_ctx: CLIContext, destination: str, include: str, compress: bool,
     encrypt: bool, keyfile: Optional[str], strip_config: bool,
-    local_dry: bool, local_quiet: bool,
+    fail_on_skip: bool, local_dry: bool, local_quiet: bool,
 ) -> None:
     """Create a full backup archive.
 
@@ -5233,7 +5705,24 @@ def backup_create(
 
     def _action() -> None:
         if _is_dry(cli_ctx, local_dry):
-            _dry(cli_ctx, "backup create", destination=destination, include=include)
+            # A dry run is a preview of the real command, so it has to report
+            # the same skipped stores, honour --fail-on-skip and refuse an
+            # archive the real run would not write (#2109, #2122).
+            cfg = cli_ctx.config.to_dict()
+            sources, skipped = _collect_backup_sources(
+                cfg, cli_ctx.config_path, include, strip_config,
+            )
+            _warn_skipped(cli_ctx, skipped)
+            _raise_on_no_store_data(sources, include)
+            if fail_on_skip:
+                _raise_on_skipped(skipped, target="in the archive")
+            _dry(
+                cli_ctx,
+                "backup create",
+                destination=destination,
+                include=include,
+                skipped=skipped,
+            )
             return
 
         if keyfile:
@@ -5255,13 +5744,30 @@ def backup_create(
             passphrase = kp.read_text(encoding="utf-8").strip()
             if not passphrase:
                 raise click.ClickException(f"Keyfile {keyfile} is empty; cannot derive encryption key.")
-        elif encrypt:
-            passphrase = click.prompt("Backup passphrase", hide_input=True,
-                                      confirmation_prompt=True)
         else:
             passphrase = None
 
         cfg = cli_ctx.config.to_dict()
+        sources, skipped = _collect_backup_sources(
+            cfg, cli_ctx.config_path, include, strip_config,
+        )
+        # A configured store whose path is missing was dropped without a word,
+        # so a partial archive was reported as a success (#2009). Report every
+        # one before the prompts, and before the empty-archive check below so
+        # the missing paths are named even when no store is left to back up.
+        _warn_skipped(cli_ctx, skipped)
+
+        # Fail before any prompt instead of writing an archive with no
+        # store data in it (#1820).
+        _raise_on_no_store_data(sources, include)
+
+        if fail_on_skip:
+            _raise_on_skipped(skipped, target="in the archive")
+
+        if encrypt and passphrase is None:
+            passphrase = click.prompt("Backup passphrase", hide_input=True,
+                                      confirmation_prompt=True)
+
         if not strip_config and not encrypt and passphrase is None:
             if not quiet:
                 console.print(
@@ -5274,13 +5780,13 @@ def backup_create(
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         import tarfile, tempfile, shutil
-        sources = _collect_backup_sources(cfg, cli_ctx.config_path, include, strip_config)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             manifest: Dict[str, Any] = {
                 "include": include,
                 "version": str(__version__),
                 "files": [arcname for arcname, _ in sources],
+                "skipped": skipped,
             }
             (tmp_path / "backup_manifest.json").write_text(
                 json.dumps(manifest, indent=2), encoding="utf-8",
@@ -5348,11 +5854,13 @@ def backup_create(
 @click.option("--include",
               type=click.Choice(["graph", "vector", "triplet", "config", "ontology", "all"]),
               default="all", show_default=True)
+@click.option("--fail-on-skip", is_flag=True, default=False,
+              help="Exit non-zero when a configured store path is missing or empty.")
 @click.option("--dry-run", "local_dry", is_flag=True, default=False)
 @click.option("--quiet", "local_quiet", is_flag=True, default=False)
 @click.pass_obj
 def backup_sync(cli_ctx: CLIContext, destination: str, include: str,
-                local_dry: bool, local_quiet: bool) -> None:
+                fail_on_skip: bool, local_dry: bool, local_quiet: bool) -> None:
     """Incremental folder sync (idempotent, copies only changed files).
 
     \b
@@ -5366,10 +5874,17 @@ def backup_sync(cli_ctx: CLIContext, destination: str, include: str,
         import shutil
         dest = Path(destination)
         cfg = cli_ctx.config.to_dict()
-        sources = _collect_backup_sources(cfg, cli_ctx.config_path, include, strip_config=False)
+        sources, skipped = _collect_backup_sources(
+            cfg, cli_ctx.config_path, include, strip_config=False,
+        )
+        # A skipped store used to be discarded here, so a sync after a partial
+        # create reported success for an incomplete store set (#2014).
+        _warn_skipped(cli_ctx, skipped)
+        if fail_on_skip:
+            _raise_on_skipped(skipped, target="included in the sync")
         if _is_dry(cli_ctx, local_dry):
             _dry(cli_ctx, "sync backup", destination=str(dest), include=include,
-                 files=[a for a, _ in sources])
+                 files=[a for a, _ in sources], skipped=skipped)
             return
         dest.mkdir(parents=True, exist_ok=True)
         try:
@@ -5696,7 +6211,7 @@ def explorer(ctx: click.Context) -> None:
 
 
 @explorer.command("start")
-@click.option("--port", default=5173, type=int, show_default=True)
+@click.option("--port", default=5173, type=click.IntRange(1, 65535), show_default=True)
 @click.option("--api-url", default="http://localhost:8000", show_default=True)
 @click.option("--graph", default=None, type=click.Path(exists=True),
               help="Optional graph JSON file to preload.")
@@ -5750,7 +6265,7 @@ def explorer_status(cli_ctx: CLIContext, local_json: bool) -> None:
 
 
 @explorer.command("open")
-@click.option("--port", default=5173, type=int, show_default=True)
+@click.option("--port", default=5173, type=click.IntRange(1, 65535), show_default=True)
 @click.pass_obj
 def explorer_open(cli_ctx: CLIContext, port: int) -> None:
     """Open the Explorer in the default browser."""
