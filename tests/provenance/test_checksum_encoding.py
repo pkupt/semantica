@@ -105,12 +105,12 @@ class TestVersionDispatch:
 
     def test_hand_assigned_checksum_verifies_on_a_dict(self):
         """The documented usage assigns the digest by hand, never passing
-        through the manager's stamping path, so compute_checksum() has to
-        record the version itself or verification reads it as v1 and rejects
-        a digest it just produced."""
+        through the manager's stamping path. The row then carries no version,
+        so verification has to try v2 as well, or it reads a digest it just
+        produced as v1 and rejects it."""
         entry = {"entity_type": "entity", "activity_id": "a"}
         entry["checksum"] = compute_checksum(entry)
-        assert entry["checksum_version"] == CHECKSUM_VERSION
+        assert "checksum_version" not in entry
         assert verify_checksum(entry) is True
 
     def test_hand_assigned_checksum_verifies_on_a_dataclass(self):
@@ -123,14 +123,34 @@ class TestVersionDispatch:
             source_document="doc",
         )
         entry.checksum = compute_checksum(entry)
-        assert entry.checksum_version == CHECKSUM_VERSION
+        assert entry.checksum_version is None
         assert verify_checksum(entry) is True
 
-    def test_stamping_does_not_change_the_digest(self):
+    def test_computing_does_not_write_to_the_entry(self):
+        """compute_checksum() used to stamp the version onto its argument. A
+        function that returns a digest should not modify the value it read,
+        and a read-only comparison on a legacy row would relabel it."""
         entry = {"entity_type": "entity", "activity_id": "a"}
         first = compute_checksum(entry)
         second = compute_checksum(entry)
         assert first == second
+        assert entry == {"entity_type": "entity", "activity_id": "a"}
+
+    def test_an_unrecorded_version_still_verifies_a_legacy_digest(self):
+        entry = {"entity_type": "ab", "activity_id": "c"}
+        entry["checksum"] = compute_checksum_legacy(entry)
+        assert verify_checksum(entry) is True
+
+    def test_a_non_numeric_confidence_fails_verification_instead_of_raising(self):
+        """A malformed row is a "no", not an exception: verification answers a
+        question, and a ValueError escaping it turns one bad row into a crash
+        for the whole chain walk."""
+        entry = {"entity_type": "entity", "activity_id": "a", "confidence": "high"}
+        entry["checksum"] = compute_checksum(entry)
+        assert verify_checksum(entry) is True
+
+        entry["confidence"] = "low"
+        assert verify_checksum(entry) is False
 
 
 class TestStorageRoundTrip:
@@ -150,6 +170,38 @@ class TestStorageRoundTrip:
         mgr.track_entity("E1", source="doc1")
         mgr.track_entity("E2", source="doc1")
         assert mgr.verify_chain()["valid"] is True
+
+    def test_verify_chain_passes_with_a_legacy_row_next_to_a_new_one(self, tmp_path):
+        """The upgrade path: a row written before issue #2136 keeps its v1
+        digest and no version, rows appended after it are v2, and the chain
+        across the two still verifies. Without this the migration is only
+        argued for in prose."""
+        db_path = str(tmp_path / "mixed.db")
+        mgr = ProvenanceManager(storage_path=db_path)
+        mgr.track_entity("OLD", source="doc1")
+
+        # Rewrite the first row as the pre-migration code would have left it.
+        legacy = mgr.storage.retrieve("OLD")
+        legacy_digest = compute_checksum_legacy(legacy)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE provenance SET checksum = ?, checksum_version = NULL "
+            "WHERE entity_id = 'OLD'",
+            (legacy_digest,),
+        )
+        conn.commit()
+        conn.close()
+
+        # A row appended after the upgrade chains onto the legacy digest.
+        mgr.track_entity("NEW", source="doc1")
+
+        reopened = ProvenanceManager(storage_path=db_path)
+        old_entry = reopened.storage.retrieve("OLD")
+        new_entry = reopened.storage.retrieve("NEW")
+        assert old_entry.checksum_version is None
+        assert new_entry.checksum_version == CHECKSUM_VERSION
+        assert new_entry.previous_checksum == legacy_digest
+        assert reopened.verify_chain()["valid"] is True
 
 
 class TestEndToEndDetection:

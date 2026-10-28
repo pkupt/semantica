@@ -87,7 +87,16 @@ def _checksum_field_values(entry: Any) -> List[Any]:
         if kind == "list":
             values.append([str(item) for item in _raw_field(entry, name, [])])
         elif kind == "float":
-            values.append(str(float(_raw_field(entry, name, 1.0))))
+            raw = _raw_field(entry, name, 1.0)
+            try:
+                values.append(str(float(raw)))
+            except (TypeError, ValueError):
+                # A row whose confidence is not numeric must fail verification,
+                # not raise while verifying it: verify_checksum() answers a
+                # question, and a malformed row is a "no", not an exception.
+                # Falling back to the raw text keeps the value hashable and
+                # still changes the digest if someone edits it.
+                values.append(str(raw))
         elif kind == "bool":
             values.append(str(bool(_raw_field(entry, name, False))))
         else:
@@ -144,13 +153,14 @@ def compute_checksum(entry: Any) -> str:
     verify_chain() (it requires a delete+insert, which breaks the chain for
     whatever the deleted row's successor was).
 
-    The encoding version is stamped onto ``entry`` as a side effect, because
-    verification dispatches on it: a caller who assigns the digest by hand
-    (``entry.checksum = compute_checksum(entry)``, as the example below does)
-    never passes through the manager's stamping path, and without the stamp
-    ``verify_checksum()`` would read a missing version as v1 and reject a
-    valid v2 digest. ``checksum_version`` is not itself hashed, so writing it
-    does not change the digest that was just computed.
+    The encoding version is recorded on the row when it is written
+    (``ProvenanceManager._save_entry``), not here: computing a digest should
+    not write to the value it was given, and a read-only comparison on a
+    legacy row must not relabel that row in memory. A caller who assigns the
+    digest by hand (``entry.checksum = compute_checksum(entry)``, as the
+    example below does) never reaches that path, so ``verify_checksum()``
+    treats a row with no recorded version as "v2, else v1" rather than
+    assuming the old scheme.
 
     Args:
         entry: ProvenanceEntry or dict to compute checksum for
@@ -169,11 +179,22 @@ def compute_checksum(entry: Any) -> str:
         >>> print(checksum)
         'a3b2c1d4e5f6...'
     """
-    if isinstance(entry, dict):
-        entry["checksum_version"] = CHECKSUM_VERSION
-    elif hasattr(entry, "checksum_version"):
-        entry.checksum_version = CHECKSUM_VERSION
     return hashlib.sha256(_encode_fields(_checksum_field_values(entry))).hexdigest()
+
+
+def _recorded_checksum_version(entry: Any) -> Optional[int]:
+    """Return the version recorded on ``entry``, or None when it carries none."""
+    raw = (
+        entry.get("checksum_version")
+        if isinstance(entry, dict)
+        else getattr(entry, "checksum_version", None)
+    )
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def checksum_version(entry: Any) -> int:
@@ -183,18 +204,15 @@ def checksum_version(entry: Any) -> int:
     Rows written before issue #2136 carry no version and are treated as v1, so
     an existing store keeps verifying after upgrade without being re-hashed
     and without a caller-facing flag.
+
+    The recorded version is trusted metadata, not an authenticated field: it is
+    not one of the hashed values, so a writer who can update a row can relabel a
+    v2 row as v1 and have it checked under the collision-prone encoding. That is
+    outside what a per-row digest claims to protect — detecting a rewrite is the
+    chain's job (``previous_checksum``), not this field's.
     """
-    raw = (
-        entry.get("checksum_version")
-        if isinstance(entry, dict)
-        else getattr(entry, "checksum_version", None)
-    )
-    if raw is None:
-        return LEGACY_CHECKSUM_VERSION
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return LEGACY_CHECKSUM_VERSION
+    recorded = _recorded_checksum_version(entry)
+    return LEGACY_CHECKSUM_VERSION if recorded is None else recorded
 
 
 def compute_checksum_legacy(entry: Any) -> str:
@@ -280,10 +298,22 @@ def verify_checksum(entry: Any, expected_checksum: Optional[str] = None) -> bool
     
     if expected_checksum is None:
         return False
-    
+
+    recorded = _recorded_checksum_version(entry)
+    if recorded is None:
+        # No version on the row: either it predates the migration (v1) or the
+        # digest was assigned by hand from compute_checksum() (v2). Try v2
+        # first — a v1 digest cannot match it, since the encodings differ from
+        # the header on — and fall back to the old scheme, which is what keeps
+        # an unmigrated store verifying.
+        return (
+            compute_checksum(entry) == expected_checksum
+            or compute_checksum_legacy(entry) == expected_checksum
+        )
+
     compute = (
         compute_checksum
-        if checksum_version(entry) >= CHECKSUM_VERSION
+        if recorded >= CHECKSUM_VERSION
         else compute_checksum_legacy
     )
     return compute(entry) == expected_checksum
