@@ -4707,158 +4707,61 @@ class TestDoctorEmbeddingHintsAndEnv:
 
 
 class TestDoctorBackendEnvResolution:
-    """#1818: doctor must inspect the configuration actually in effect.
+    """#1818: doctor must report the MCP server's stores, which are configured
+    only through ``SEMANTICA_VECTOR_*`` / ``SEMANTICA_KG_PATH``.
 
-    The MCP runtime selects its vector store and graph file from
-    ``SEMANTICA_VECTOR_BACKEND`` / ``SEMANTICA_KG_PATH``, but doctor only read
-    the config file and fell back to faiss — so a working sqlite-vec deployment
-    was reported as broken.
+    Those variables never change what CLI commands build, so they get their own
+    rows resolved by the server's session helpers instead of being folded into
+    the CLI's vector and graph checks.
     """
 
-    @pytest.fixture
-    def bare_cfg(self, tmp_path):
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("graph_db:\n  backend: memory\n")
-        return str(cfg)
+    _MCP_ENV = (
+        "SEMANTICA_VECTOR_BACKEND",
+        "SEMANTICA_VECTOR_DB_PATH",
+        "SEMANTICA_VECTOR_PATH",
+        "SEMANTICA_KG_PATH",
+    )
 
-    def _checks(self, runner, config, *extra):
-        args = ["--config", config, "doctor", "--json", *extra]
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for var in self._MCP_ENV:
+            monkeypatch.delenv(var, raising=False)
+
+    @pytest.fixture
+    def cfg(self, tmp_path):
+        # graph_db.path keeps the CLI graph row off the real ~/.semantica.
+        def _write(extra=""):
+            path = tmp_path / "cfg.yaml"
+            path.write_text(
+                "graph_db:\n  backend: memory\n"
+                f"  path: {tmp_path / 'cli_graph.json'}\n" + extra
+            )
+            return str(path)
+
+        return _write
+
+    def _checks(self, runner, config):
+        args = ["--config", config, "doctor", "--json"]
         result = runner.invoke(cli_module.main, args)
         _ok(result)
         return {c["check"]: c for c in json.loads(result.output)}
 
-    def _ctx(self, tmp_path, *, store_backend=None, vector_backend=None, cfg=None):
-        path = tmp_path / "ctx.yaml"
-        path.write_text(cfg if cfg is not None else "graph_db:\n  backend: memory\n")
-        config = cli_module._build_runtime_config(str(path), None)
-        return cli_module.CLIContext(
-            config_path=str(path),
-            config=config,
-            log_level="INFO",
-            store_backend=store_backend,
-            vector_store_backend=vector_backend,
-        )
+    @staticmethod
+    def _without_faiss(monkeypatch):
+        monkeypatch.setitem(sys.modules, "faiss", None)
 
-    def test_vector_backend_defaults_to_faiss(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("SEMANTICA_VECTOR_BACKEND", raising=False)
-        assert cli_module._resolve_vector_backend(self._ctx(tmp_path)) == "faiss"
+    @staticmethod
+    def _with_faiss(monkeypatch):
+        monkeypatch.setitem(sys.modules, "faiss", types.ModuleType("faiss"))
 
-    def test_vector_backend_reads_the_env_var(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
-        assert cli_module._resolve_vector_backend(self._ctx(tmp_path)) == "sqlite"
+    @staticmethod
+    def _sqlite_vec_loads(monkeypatch):
+        monkeypatch.setattr(cli_module, "_probe_sqlite_vec", lambda: None)
 
-    def test_env_var_is_normalised(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "  SQLite ")
-        assert cli_module._resolve_vector_backend(self._ctx(tmp_path)) == "sqlite"
-
-    def test_flag_beats_the_env_var(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
-        ctx = self._ctx(tmp_path, vector_backend="inmemory")
-        assert cli_module._resolve_vector_backend(ctx) == "inmemory"
-
-    def test_config_beats_the_env_var(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
-        ctx = self._ctx(tmp_path, cfg="vector_store:\n  backend: qdrant\n")
-        assert cli_module._resolve_vector_backend(ctx) == "qdrant"
-
-    def test_doctor_reports_the_env_backend(self, runner, bare_cfg, monkeypatch):
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "inmemory")
-        row = self._checks(runner, bare_cfg)["Vector store"]
-        assert row["status"] == "ok"
-        assert "inmemory" in row["note"]
-        assert "faiss" not in row["note"]
-
-    def test_doctor_reports_sqlite_vec_when_available(
-        self, runner, bare_cfg, monkeypatch
-    ):
-        import semantica.vector_store.sqlite_vec_store as sqlite_store
-
-        fake = types.ModuleType("sqlite_vec")
-        fake.load = lambda conn: None
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
-        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", True)
-        monkeypatch.setitem(sys.modules, "sqlite_vec", fake)
-        row = self._checks(runner, bare_cfg)["Vector store"]
-        assert row["status"] == "ok"
-        assert "sqlite-vec" in row["note"]
-
-    def test_doctor_flags_a_sqlite_vec_that_fails_to_load(
-        self, runner, bare_cfg, monkeypatch
-    ):
-        # #1934 qodo: a discoverable package that cannot load the native
-        # extension must fail, not report a healthy sqlite-vec store.
-        import semantica.vector_store.sqlite_vec_store as sqlite_store
-
-        def _boom(conn):
-            raise OSError("cannot load extension")
-
-        fake = types.ModuleType("sqlite_vec")
-        fake.load = _boom
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
-        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", True)
-        monkeypatch.setitem(sys.modules, "sqlite_vec", fake)
-        row = self._checks(runner, bare_cfg)["Vector store"]
-        assert row["status"] == "fail"
-        assert "failed to load" in row["note"]
-
-    def test_doctor_flags_a_missing_sqlite_vec_with_an_install_hint(
-        self, runner, bare_cfg, monkeypatch
-    ):
-        import semantica.vector_store.sqlite_vec_store as sqlite_store
-
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
-        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", False)
-        row = self._checks(runner, bare_cfg)["Vector store"]
-        assert row["status"] == "fail"
-        assert "vectorstore-sqlite" in row["note"]
-
-    def test_vector_backend_rejects_an_unsupported_env_value(
-        self, tmp_path, monkeypatch
-    ):
-        # #1934 qodo: the MCP tools reject a backend outside their set, so a
-        # typo must surface as a failure rather than a healthy store.
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqltie")
-        with pytest.raises(ValueError) as excinfo:
-            cli_module._resolve_vector_backend(self._ctx(tmp_path))
-        assert "not supported by the MCP retrieval tools" in str(excinfo.value)
-        assert "supported backends: inmemory, sqlite" in str(excinfo.value)
-
-    def test_doctor_flags_an_unsupported_vector_backend_env(
-        self, runner, bare_cfg, monkeypatch
-    ):
-        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqltie")
-        row = self._checks(runner, bare_cfg)["Vector store"]
-        assert row["status"] == "fail"
-        assert "sqltie" in row["note"]
-
-    def test_memory_graph_path_reads_the_kg_path_env(self, tmp_path, monkeypatch):
-        kg = tmp_path / "mcp_graph.json"
-        monkeypatch.setenv("SEMANTICA_KG_PATH", str(kg))
-        path = cli_module._memory_graph_path(self._ctx(tmp_path), allow_env=True)
-        assert path == kg
-
-    def test_memory_graph_path_ignores_the_kg_path_env_for_writes(
-        self, tmp_path, monkeypatch
-    ):
-        # #1934 qodo: only doctor's read-only check may follow SEMANTICA_KG_PATH;
-        # a CLI decision write must not target the MCP server's cached graph.
-        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "mcp_graph.json"))
-        path = cli_module._memory_graph_path(self._ctx(tmp_path))
-        assert path == cli_module.Path.home() / ".semantica" / "context_graph.json"
-
-    def test_config_path_beats_the_kg_path_env(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "mcp.json"))
-        cfg = f"graph_db:\n  backend: memory\n  path: {tmp_path / 'cfg.json'}\n"
-        ctx = self._ctx(tmp_path, cfg=cfg)
-        path = cli_module._memory_graph_path(ctx, allow_env=True)
-        assert path == tmp_path / "cfg.json"
-
-    def test_doctor_counts_decisions_from_the_kg_path_env(
-        self, runner, bare_cfg, monkeypatch, tmp_path
-    ):
+    @staticmethod
+    def _save_graph_with_one_decision(path):
         from semantica.context import ContextGraph
 
-        kg = tmp_path / "mcp_graph.json"
         graph = ContextGraph()
         graph.record_decision(
             category="vendor_selection",
@@ -4867,11 +4770,146 @@ class TestDoctorBackendEnvResolution:
             outcome="selected_sqlite",
             confidence=0.9,
         )
-        graph.save_to_file(kg)
-        monkeypatch.setenv("SEMANTICA_KG_PATH", str(kg))
-        row = self._checks(runner, bare_cfg)["Graph store"]
+        graph.save_to_file(path)
+
+    def test_no_mcp_rows_without_mcp_env(self, runner, cfg):
+        checks = self._checks(runner, cfg())
+        assert "MCP vector store" not in checks
+        assert "MCP graph" not in checks
+
+    def test_reports_the_mcp_sqlite_store(self, runner, cfg, tmp_path, monkeypatch):
+        self._sqlite_vec_loads(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", " SQLite ")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        row = self._checks(runner, cfg())["MCP vector store"]
         assert row["status"] == "ok"
-        assert "1 decision" in row["note"]
+        assert row["note"] == "sqlite-vec loaded"
+
+    def test_mcp_env_is_read_even_when_init_wrote_a_cli_backend(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        # `semantica init` writes vector_store.backend: faiss by default; that
+        # must neither hide the MCP store nor be replaced by it.
+        self._with_faiss(monkeypatch)
+        self._sqlite_vec_loads(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        checks = self._checks(runner, cfg("vector_store:\n  backend: faiss\n"))
+        assert checks["MCP vector store"]["note"] == "sqlite-vec loaded"
+        assert checks["Vector store"]["note"] == "faiss importable"
+
+    def test_mcp_vector_defaults_to_inmemory(self, runner, cfg, tmp_path, monkeypatch):
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "kg.json"))
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "ok"
+        assert row["note"] == "inmemory"
+
+    def test_flags_sqlite_without_a_db_path(self, runner, cfg, monkeypatch):
+        # The server refuses to start this way, so doctor must not pass it.
+        self._sqlite_vec_loads(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "SEMANTICA_VECTOR_DB_PATH" in row["note"]
+
+    def test_flags_an_unsupported_mcp_backend(self, runner, cfg, monkeypatch):
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "faiss")
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "supported backends: inmemory, sqlite" in row["note"]
+
+    def test_flags_a_missing_sqlite_vec(self, runner, cfg, tmp_path, monkeypatch):
+        import semantica.vector_store.sqlite_vec_store as sqlite_store
+
+        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", False)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "not installed" in row["note"]
+        assert "vectorstore-sqlite" in row["hint"]
+
+    def test_flags_a_sqlite_vec_that_fails_to_load(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        # Discoverable but unloadable must fail: the probe runs the store's
+        # real load path rather than trusting find_spec.
+        import semantica.vector_store.sqlite_vec_store as sqlite_store
+        from semantica.utils.exceptions import ProcessingError
+
+        def _boom(**_):
+            raise ProcessingError("Failed to load sqlite-vec extension: boom")
+
+        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", True)
+        monkeypatch.setattr(sqlite_store, "SQLiteVecStore", _boom)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "Failed to load sqlite-vec extension" in row["note"]
+
+    def test_unconfigured_faiss_is_a_warning_for_an_mcp_deployment(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        self._without_faiss(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "kg.json"))
+        row = self._checks(runner, cfg())["Vector store"]
+        assert row["status"] == "warn"
+        assert "CLI default" in row["note"]
+
+    def test_unconfigured_faiss_still_fails_without_mcp_env(
+        self, runner, cfg, monkeypatch
+    ):
+        self._without_faiss(monkeypatch)
+        assert self._checks(runner, cfg())["Vector store"]["status"] == "fail"
+
+    def test_configured_faiss_still_fails_for_an_mcp_deployment(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        self._without_faiss(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "kg.json"))
+        config = cfg("vector_store:\n  backend: faiss\n")
+        assert self._checks(runner, config)["Vector store"]["status"] == "fail"
+
+    def test_mcp_graph_counts_decisions_from_kg_path(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        kg = tmp_path / "mcp_graph.json"
+        self._save_graph_with_one_decision(kg)
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(kg))
+        checks = self._checks(runner, cfg())
+        assert checks["MCP graph"]["status"] == "ok"
+        assert checks["MCP graph"]["note"] == "1 decision(s)"
+        # The CLI graph is a different file; it must not report the MCP one.
+        assert checks["Graph store"]["note"] == "memory, 0 decision(s)"
+
+    def test_mcp_graph_accepts_an_empty_or_missing_file(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        # The server starts empty from both, so neither is a failure.
+        empty = tmp_path / "empty.json"
+        empty.write_text("")
+        for path in (empty, tmp_path / "missing.json"):
+            monkeypatch.setenv("SEMANTICA_KG_PATH", str(path))
+            row = self._checks(runner, cfg())["MCP graph"]
+            assert row["status"] == "ok"
+            assert row["note"] == "new graph, created on first save"
+
+    def test_mcp_graph_flags_an_unreadable_file(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        kg = tmp_path / "corrupt.json"
+        kg.write_text("{not json")
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(kg))
+        row = self._checks(runner, cfg())["MCP graph"]
+        assert row["status"] == "fail"
+        assert "persistence would be disabled" in row["note"]
+
+    def test_mcp_graph_without_kg_path_is_in_memory(self, runner, cfg, monkeypatch):
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "inmemory")
+        row = self._checks(runner, cfg())["MCP graph"]
+        assert row["status"] == "ok"
+        assert "not persisted" in row["note"]
 
 
 class TestDoctorTableLayout:
