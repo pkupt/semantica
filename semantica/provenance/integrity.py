@@ -20,7 +20,8 @@ License: MIT
 """
 
 import hashlib
-from typing import Any, Dict, List, Optional
+from collections.abc import Mapping
+from typing import Any, Callable, Dict, List, Optional
 from .schemas import ProvenanceEntry
 
 
@@ -61,15 +62,26 @@ _CHECKSUM_FIELDS = (
 # Encoding tags. Every value is written as <tag><4-byte big-endian length>
 # <utf-8 bytes>; a list is written as <tag><count> then each element in the
 # same length-prefixed form, so ["a,b"] and ["a", "b"] cannot collide either.
+# A null is the tag alone, so a NULL confidence cannot hash like 1.0.
 _TAG_SCALAR = b"\x01"
 _TAG_LIST = b"\x02"
+_TAG_NULL = b"\x03"
 _V2_HEADER = b"prov-v2\x00"
+
+_MISSING = object()
+
+
+def _get(entry: Any, name: str) -> Any:
+    """Read a field from a mapping or an object; ``_MISSING`` when absent."""
+    if isinstance(entry, Mapping):
+        return entry.get(name, _MISSING)
+    return getattr(entry, name, _MISSING)
 
 
 def _raw_field(entry: Any, name: str, default: Any) -> Any:
-    """Read a field from a dict or a dataclass, treating None as absent."""
-    value = entry.get(name) if isinstance(entry, dict) else getattr(entry, name, None)
-    return default if value is None else value
+    """Read a field from a mapping or a dataclass, treating None as absent."""
+    value = _get(entry, name)
+    return default if value is _MISSING or value is None else value
 
 
 def _checksum_field_values(entry: Any) -> List[Any]:
@@ -85,12 +97,29 @@ def _checksum_field_values(entry: Any) -> List[Any]:
     values: List[Any] = []
     for name, kind in _CHECKSUM_FIELDS:
         if kind == "list":
-            values.append([str(item) for item in _raw_field(entry, name, [])])
+            raw = _raw_field(entry, name, [])
+            if isinstance(raw, (list, tuple)):
+                values.append([str(item) for item in raw])
+            else:
+                # A non-list value (a corrupted row, or a bare string) is
+                # hashed as a scalar: the tag keeps it from colliding with any
+                # list, so "ab" cannot pass for ["a", "b"], and it is a
+                # mismatch rather than a TypeError mid-verify_chain().
+                values.append(str(raw))
         elif kind == "float":
-            raw = _raw_field(entry, name, 1.0)
+            raw = _get(entry, name)
+            if raw is _MISSING:
+                # An absent confidence is the dataclass default, so a dict
+                # without the key hashes like a ProvenanceEntry with 1.0.
+                raw = 1.0
+            if raw is None:
+                # An explicit NULL is not 1.0: hashing it as the default would
+                # let `SET confidence = NULL` pass verification.
+                values.append(None)
+                continue
             try:
                 values.append(str(float(raw)))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 # A row whose confidence is not numeric must fail verification,
                 # not raise while verifying it: verify_checksum() answers a
                 # question, and a malformed row is a "no", not an exception.
@@ -108,7 +137,9 @@ def _encode_fields(values: List[Any]) -> bytes:
     """Encode a value vector so no two distinct vectors collide (issue #2136)."""
     out = bytearray(_V2_HEADER)
     for value in values:
-        if isinstance(value, list):
+        if value is None:
+            out += _TAG_NULL
+        elif isinstance(value, list):
             out += _TAG_LIST
             out += len(value).to_bytes(4, "big")
             for item in value:
@@ -184,16 +215,12 @@ def compute_checksum(entry: Any) -> str:
 
 def _recorded_checksum_version(entry: Any) -> Optional[int]:
     """Return the version recorded on ``entry``, or None when it carries none."""
-    raw = (
-        entry.get("checksum_version")
-        if isinstance(entry, dict)
-        else getattr(entry, "checksum_version", None)
-    )
+    raw = _raw_field(entry, "checksum_version", None)
     if raw is None:
         return None
     try:
         return int(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -201,9 +228,12 @@ def checksum_version(entry: Any) -> int:
     """
     Return the checksum encoding version recorded on ``entry``.
 
-    Rows written before issue #2136 carry no version and are treated as v1, so
-    an existing store keeps verifying after upgrade without being re-hashed
-    and without a caller-facing flag.
+    Rows written before issue #2136 carry no version and report v1, so an
+    existing store keeps verifying after upgrade without being re-hashed and
+    without a caller-facing flag. A digest assigned by hand from
+    ``compute_checksum()`` carries no version either, so ``verify_checksum()``
+    accepts either encoding on an unversioned row; this helper reports what
+    was recorded, not which encoding matched.
 
     The recorded version is trusted metadata, not an authenticated field: it is
     not one of the hashed values, so a writer who can update a row can relabel a
@@ -291,32 +321,51 @@ def verify_checksum(entry: Any, expected_checksum: Optional[str] = None) -> bool
         True
     """
     if expected_checksum is None:
-        if isinstance(entry, dict):
-            expected_checksum = entry.get("checksum")
-        else:
-            expected_checksum = getattr(entry, "checksum", None)
-    
+        expected_checksum = _raw_field(entry, "checksum", None)
+
     if expected_checksum is None:
         return False
 
     recorded = _recorded_checksum_version(entry)
     if recorded is None:
         # No version on the row: either it predates the migration (v1) or the
-        # digest was assigned by hand from compute_checksum() (v2). Try v2
-        # first — a v1 digest cannot match it, since the encodings differ from
-        # the header on — and fall back to the old scheme, which is what keeps
-        # an unmigrated store verifying.
-        return (
-            compute_checksum(entry) == expected_checksum
-            or compute_checksum_legacy(entry) == expected_checksum
-        )
+        # digest was assigned by hand from compute_checksum() (v2). The two
+        # encodings cannot produce the same digest, so trying both detects
+        # exactly what dispatching would. v1 goes first because every row of
+        # an unmigrated store is v1.
+        return _matches(
+            compute_checksum_legacy, entry, expected_checksum
+        ) or _matches(compute_checksum, entry, expected_checksum)
 
-    compute = (
-        compute_checksum
-        if recorded >= CHECKSUM_VERSION
-        else compute_checksum_legacy
-    )
-    return compute(entry) == expected_checksum
+    # An unknown version (0, negative, or newer than this code) is a mismatch,
+    # not a guess at the nearest encoding.
+    compute = _ENCODERS.get(recorded)
+    return compute is not None and _matches(compute, entry, expected_checksum)
+
+
+def _matches(
+    compute: Callable[[Any], str], entry: Any, expected_checksum: str
+) -> bool:
+    """
+    True when ``compute(entry)`` equals the expected digest.
+
+    A row too malformed to encode (the v1 encoder raises on non-string
+    ``used_entities`` or an object without ``entity_type``) is a "no", so one
+    corrupted row is reported by verify_chain() instead of aborting it.
+    """
+    try:
+        return compute(entry) == expected_checksum
+    except (TypeError, ValueError, AttributeError, OverflowError):
+        return False
+
+
+# One encoder per recorded version. A new encoding adds an entry here and
+# bumps CHECKSUM_VERSION; existing rows keep dispatching to the encoder they
+# were written with.
+_ENCODERS: Dict[int, Callable[[Any], str]] = {
+    LEGACY_CHECKSUM_VERSION: compute_checksum_legacy,
+    CHECKSUM_VERSION: compute_checksum,
+}
 
 
 def compute_data_checksum(data: str) -> str:

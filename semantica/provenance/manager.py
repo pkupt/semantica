@@ -170,8 +170,8 @@ class ProvenanceManager:
 
         # Stamp the encoding version alongside the checksum so verification can
         # dispatch per row instead of taking a caller-facing allow-legacy flag
-        # (issue #2136): rows written before this change carry no version and
-        # are checked with the v1 scheme.
+        # (issue #2136): rows written before this change carry no version, and
+        # verify_checksum() accepts either encoding on such a row.
         entry.checksum_version = CHECKSUM_VERSION
         entry.checksum = compute_checksum(entry)
 

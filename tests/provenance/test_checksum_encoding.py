@@ -245,3 +245,148 @@ class TestEndToEndDetection:
 
         result = ProvenanceManager(storage_path=db_path).verify_chain()
         assert result["valid"] is False
+
+
+# Every hashed field set to a non-default value, so a reordered, added or
+# re-tagged field changes the digest.
+_GOLDEN_ENTRY = {
+    "entity_type": "entity",
+    "activity_id": "extraction",
+    "agent_id": "agent-1",
+    "agent_type": "software",
+    "source_document": "DOI:10.1/x",
+    "timestamp": "2026-01-02T03:04:05+00:00",
+    "confidence": 0.75,
+    "parent_entity_id": "p",
+    "previous_version_id": "pv",
+    "derived_from_id": "d",
+    "used_entities": ["u1", "u2"],
+    "previous_checksum": "abc",
+    "invalidated": True,
+    "invalidated_at_time": "2026-02-01T00:00:00+00:00",
+    "invalidated_by": "rev",
+    "invalidation_reason": "retracted",
+}
+
+
+class TestGoldenDigests:
+    """Stored rows carry these digests, so they are a format, not an output:
+    changing either encoding without bumping CHECKSUM_VERSION would report
+    every existing row as tampered."""
+
+    def test_v2_digest_is_pinned(self):
+        assert compute_checksum(_GOLDEN_ENTRY) == (
+            "a39d79d05d6fbd1f2f4d4ef0f39a68076cd3ebbcadafb64c2b34d53274b24dd6"
+        )
+
+    def test_v1_digest_matches_the_pre_2136_encoder(self):
+        """The value main's compute_checksum() produced before the fix."""
+        assert compute_checksum_legacy(_GOLDEN_ENTRY) == (
+            "6af44d3f102ab3e2a5df99a3a4f2ac903e3180a7cdca6b1894d7b6ea2bd1c471"
+        )
+
+
+class TestMalformedInput:
+    def test_null_confidence_does_not_hash_like_the_default(self):
+        """v1's dataclass path hashed a NULL confidence as 'None', so
+        `SET confidence = NULL` was caught; defaulting it to 1.0 would not."""
+        base = {"entity_type": "entity", "activity_id": "a"}
+        assert compute_checksum({**base, "confidence": None}) != compute_checksum(
+            {**base, "confidence": 1.0}
+        )
+
+    def test_absent_confidence_still_hashes_like_the_default(self):
+        base = {"entity_type": "entity", "activity_id": "a"}
+        assert compute_checksum(base) == compute_checksum({**base, "confidence": 1.0})
+
+    def test_verify_chain_detects_confidence_set_to_null(self, tmp_path):
+        db_path = str(tmp_path / "null_confidence.db")
+        ProvenanceManager(storage_path=db_path).track_entity("E1", source="doc1")
+
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE provenance SET confidence = NULL WHERE entity_id = 'E1'")
+        conn.commit()
+        conn.close()
+
+        assert ProvenanceManager(storage_path=db_path).verify_chain()["valid"] is False
+
+    def test_a_string_used_entities_does_not_hash_like_a_list(self):
+        assert compute_checksum({"used_entities": "ab"}) != compute_checksum(
+            {"used_entities": ["a", "b"]}
+        )
+
+    def test_a_non_iterable_used_entities_fails_instead_of_raising(self):
+        entry = {"entity_type": "entity", "used_entities": ["u1"]}
+        entry["checksum"] = compute_checksum(entry)
+        entry["used_entities"] = 5
+        assert verify_checksum(entry) is False
+
+    def test_an_unversioned_row_the_v1_encoder_rejects_fails_instead_of_raising(self):
+        """The v1 encoder joins used_entities as strings; non-string items
+        would raise out of the legacy fallback."""
+        entry = {"entity_type": "entity", "used_entities": [1, 2]}
+        entry["checksum"] = "0" * 64
+        assert verify_checksum(entry) is False
+
+    def test_verify_chain_reports_a_tampered_unversioned_row_instead_of_raising(
+        self, tmp_path
+    ):
+        db_path = str(tmp_path / "int_items.db")
+        mgr = ProvenanceManager(storage_path=db_path)
+        mgr.track_entity("E1", source="doc1", used_entities=[1, 2])
+        assert mgr.verify_chain()["valid"] is True
+
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE provenance SET checksum_version = NULL, source_document = 'doc2' "
+            "WHERE entity_id = 'E1'"
+        )
+        conn.commit()
+        conn.close()
+
+        assert ProvenanceManager(storage_path=db_path).verify_chain()["valid"] is False
+
+    def test_an_object_without_the_fields_fails_instead_of_raising(self):
+        class Bare:
+            checksum = "0" * 64
+
+        assert verify_checksum(Bare()) is False
+
+    def test_overflowing_values_fail_instead_of_raising(self):
+        assert (
+            verify_checksum(
+                {"entity_type": "x", "checksum": "abc", "checksum_version": float("inf")}
+            )
+            is False
+        )
+        assert verify_checksum({"confidence": 10**400, "checksum": "abc"}) is False
+
+    def test_a_non_dict_mapping_is_read_by_key(self):
+        """A Mapping that is not a dict used to be read with getattr, so every
+        such entry hashed to the same digest of defaults."""
+        from types import MappingProxyType
+
+        a = MappingProxyType({"entity_type": "x", "activity_id": "y"})
+        b = MappingProxyType({"entity_type": "other", "activity_id": "z"})
+        assert compute_checksum(a) != compute_checksum(b)
+        assert compute_checksum(a) == compute_checksum(dict(a))
+
+
+class TestUnknownVersions:
+    def test_an_unknown_version_fails_instead_of_using_the_nearest_encoder(self):
+        entry = {"entity_type": "entity", "activity_id": "a"}
+        v2_digest = compute_checksum(entry)
+        v1_digest = compute_checksum_legacy(entry)
+        for version in (0, -1, CHECKSUM_VERSION + 1):
+            for digest in (v1_digest, v2_digest):
+                assert (
+                    verify_checksum(
+                        {**entry, "checksum": digest, "checksum_version": version}
+                    )
+                    is False
+                )
+
+    def test_an_explicit_v1_row_verifies_with_the_legacy_encoder(self):
+        entry = {"entity_type": "ab", "activity_id": "c", "checksum_version": 1}
+        entry["checksum"] = compute_checksum_legacy(entry)
+        assert verify_checksum(entry) is True
