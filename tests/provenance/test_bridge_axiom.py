@@ -502,7 +502,7 @@ class TestProvenanceFailClosed:
             rule="Test rule",
             coefficient=2.0,
             source_doi="10.1234/test",
-            source_page="Page 1"
+            source_page="Page 1",
         )
 
     def test_failure_raises_by_default(self):
@@ -537,7 +537,7 @@ class TestProvenanceFailClosed:
             create_translation_chain(
                 {"entity_id": "e1", "value": 3, "source": "doc"},
                 [self._axiom()],
-                object()
+                object(),
             )
 
     def test_trace_reports_a_lineage_lookup_failure(self):

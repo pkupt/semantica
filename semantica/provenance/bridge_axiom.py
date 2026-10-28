@@ -229,7 +229,7 @@ class BridgeAxiom:
             "input_domain": self.input_domain,
             "output_domain": self.output_domain,
             "provenance_recorded": provenance_recorded,
-            "provenance_error": provenance_error
+            "provenance_error": provenance_error,
         }
     
     def to_dict(self) -> Dict[str, Any]:
