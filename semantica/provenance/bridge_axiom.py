@@ -59,11 +59,44 @@ Author: Semantica Contributors
 License: MIT
 """
 
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+import math
+import numbers
 import uuid
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from ..utils.helpers import utc_now_iso
+
+_APPLICABILITY_FIELDS = (
+    "units",
+    "uncertainty",
+    "applicability_min",
+    "applicability_max",
+    "extrapolated",
+    "applicability_violations",
+)
+
+
+def _check_finite_number(name: str, value: Any) -> None:
+    """
+    Reject anything that is not a finite real number.
+
+    ``None`` is allowed and means "not recorded". Everything else has to be a
+    real number: the checks in ``__post_init__`` and in
+    ``applicability_violations`` are comparisons, and comparisons are silently
+    False against NaN, so a NaN bound would pass every test and then never
+    report a violation. A non-numeric one-sided bound such as ``'0'`` survives
+    construction for the same reason but raises TypeError later, when the axiom
+    is applied to a real number instead.
+    """
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise TypeError(
+            f"{name} must be a real number, got {type(value).__name__}: {value!r}"
+        )
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {value!r}")
 
 
 @dataclass
@@ -152,6 +185,9 @@ class BridgeAxiom:
         checked; an inverted window would otherwise silently report every
         input as out of range, or none of them.
         """
+        _check_finite_number("applicability_min", self.applicability_min)
+        _check_finite_number("applicability_max", self.applicability_max)
+        _check_finite_number("uncertainty", self.uncertainty)
         if (
             self.applicability_min is not None
             and self.applicability_max is not None
@@ -249,6 +285,12 @@ class BridgeAxiom:
                     source_quote=self.source_quote,
                     confidence=self.confidence,
                     metadata={
+                        # Caller extras first: the computed fields below
+                        # describe what actually happened, so a keyword with
+                        # the same name must not replace them. Otherwise
+                        # apply(..., extrapolated=False) would record False in
+                        # the audit trail while the result says True.
+                        **kwargs,
                         "axiom_id": self.axiom_id,
                         "axiom_name": self.name,
                         "rule": self.rule,
@@ -264,7 +306,6 @@ class BridgeAxiom:
                         "applicability_max": self.applicability_max,
                         "extrapolated": extrapolated,
                         "applicability_violations": violations,
-                        **kwargs
                     }
                 )
             except Exception:
@@ -452,7 +493,17 @@ def create_translation_chain(
             source=axiom.source_doi,
             axiom_id=axiom.axiom_id,
             axiom_name=axiom.name,
-            rule=axiom.rule
+            rule=axiom.rule,
+            # Carry the applicability context onto the layer itself: a chain
+            # built without a provenance manager has nowhere else to record
+            # that a step extrapolated, and the serialized chain is what a
+            # caller reads afterwards.
+            units=result["units"],
+            uncertainty=result["uncertainty"],
+            applicability_min=result["applicability_min"],
+            applicability_max=result["applicability_max"],
+            extrapolated=result["extrapolated"],
+            applicability_violations=result["applicability_violations"]
         )
         
         # Update for next iteration
@@ -505,6 +556,14 @@ def trace_translation_chain(
             "value": layer.get("value"),
             "source": layer.get("source")
         }
+
+        # A layer that recorded its applicability context keeps it in the
+        # trace, so a consumer of the trace can see which step extrapolated
+        # without opening the stored provenance records. Layers built before
+        # this existed simply omit the keys.
+        for key in _APPLICABILITY_FIELDS:
+            if key in layer:
+                layer_trace[key] = layer[key]
         
         # Get provenance for entities in this layer
         entity_id = layer.get("entity_id")

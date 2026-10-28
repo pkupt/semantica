@@ -419,7 +419,9 @@ print(outside["applicability_violations"])
 print(outside["output_value"])  # still computed: 4.325
 ```
 
-The output value is returned either way, because refusing an extrapolated number is a decision for the caller; `extrapolated` and `applicability_violations` are also written into the provenance record for the result. Bounds are inclusive, an inverted window raises `ValueError` at construction, and an axiom without a window never reports extrapolation.
+The output value is returned either way, because refusing an extrapolated number is a decision for the caller; `extrapolated` and `applicability_violations` are also written into the provenance record for the result. Bounds are inclusive, an axiom without a window never reports extrapolation, and construction rejects an inverted window, a non-finite bound or a non-numeric one.
+
+`create_translation_chain()` carries the same context onto each axiom layer, together with that step's `extrapolated` flag, and `trace_translation_chain()` exposes it. A chain built without a provenance manager therefore still records which step ran outside its own source's range, which is otherwise exactly what a multi-step translation hides.
 
 ## Integration with GraphBuilder
 
