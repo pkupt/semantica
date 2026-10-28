@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `DecisionRecorder` and `AgentContext` gain opt-in `evaluators`/`eval_config` constructor parameters that run `semantica.evals` evaluators (e.g. `decision_scores`) automatically during `record_decision()`, storing `eval_score`/`eval_passed`/`eval_details` in `Decision.metadata`. Fully backward-compatible: omitting `evaluators` leaves recording behavior unchanged. Evaluator failures are logged and never block decision persistence. Wired for the `graph_store` backend only; the `context_graph` `AgentContext` backend is a known follow-up.
+- `DecisionRecorder` and `AgentContext` gain opt-in `evaluators`/`eval_config` constructor parameters that run `semantica.evals` evaluators (e.g. `decision_scores`) automatically during `record_decision()`, storing `eval_score`/`eval_passed`/`eval_details` in `Decision.metadata`. Fully backward-compatible: omitting `evaluators` leaves recording behavior unchanged. Evaluator failures are logged and never block decision persistence. Both the `graph_store` and `context_graph` `AgentContext` decision backends run the hook.
 - **Trust-tier grading of retrieved context** (#1703, phase 2 of #1557) by @pkupt
   - `ContextRetriever` now grades every retrieved fact on evidence quality and records the tier in `RetrievedContext.metadata["trust_tier"]` (`quarantine` / `bronze` / `silver` / `gold`). Tiers are computed at query time from signals already present in the result — graph node confidence and, when a `provenance_manager` is configured, the number of distinct sources from `get_all_sources` — and are never persisted, so grades stay current as source sets change
   - New `filter_by_tier(minimum, include_unscored=False)` on `ContextRetriever`, alongside the existing score/type/date filters. Graph facts without readable signals grade to `quarantine` (missing evidence is never trusted as high confidence); DRIFT's verified local facts are graded the same way as graph edges. Community-report summaries from global and DRIFT search carry no per-fact signals and stay unscored, and a threshold keeps them rather than emptying the response. Without a `provenance_manager` there is no corroboration signal, so facts grade `bronze` at best and a `silver` or `gold` threshold needs one
@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Security**: closes the 13 Pillow Dependabot alerts (including #392 and #425) and the 3 Python 3.10 filelock alerts. The 28 Pillow and 3 filelock acceptances are removed from `osv-scanner.toml` and `SECURITY.md`
 
 ### Fixed
+
+- **Relationship filtering on a `ContextGraph` rescanned the edge list for every node pair** (fixes #1927)
+  - `edge_types_between` read every edge of a `ContextGraph` for each (node, neighbour) pair it classified, so `detect_communities_label_propagation` and `calculate_pagerank` with `relationship_types` were O(E^2): about 21 s each on a 6,000-edge graph. `build_edge_type_index` now indexes a `ContextGraph`'s edge list as well, and both callers build the index once per call (1.4 s and 0.09 s on the same graph). The per-pair answers are unchanged. New `tests/kg/test_context_graph_edge_type_index.py`
 
 - **TOML config files were silently ignored on Python 3.11+**
   - `GraphStoreConfig`, `TripletStoreConfig` and `VectorStoreConfig` loaded `.toml` files with the `tomli` backport, which Semantica never declared and which is usually absent on 3.11+. The `ImportError` was caught, logged and the file's settings dropped. With 3.11 as the floor, all four config classes (including `VisualizationConfig`, which had a two-level fallback) use the stdlib `tomllib`. New `tests/test_toml_config_loading.py`
@@ -87,9 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - **Bumped the three packages behind the failing audit gate: `authlib` 1.8.0 → 1.9.1, `litellm` 1.100.1 → 1.100.4, `msgpack` 1.2.2 → 1.2.3**
-  - New advisories were published against pins we already had, so `security-scan` started failing on `main` on 2026-10-28 with no dependency change of our own. pip-audit reports 8 actionable findings in these three packages: 6 for `authlib` (CVE-2026-114615/114616/114617/114618/114620/96760 — JWS signature forgery, nonce and audience validation in the OAuth paths, and a `request_uri` SSRF), `litellm` CVE-2026-114612 and `msgpack` CVE-2026-114613. The 9th finding, `opentelemetry-api` CVE-2026-114603, is already accepted in `security-scan.yml` because every `google-adk` release caps that package below the fix
+  - New advisories were published against pins we already had, so `security-scan` started failing on `main` on 2026-10-28 with no dependency change of our own. pip-audit reports 9 actionable findings in these three packages: 7 for `authlib` (CVE-2026-114615/114616/114617/114618/114619/114620/96760 — JWS signature forgery, nonce and audience validation in the OAuth paths, an implicit-grant scope check that compared the raw scope instead of the allowed one, and a `request_uri` SSRF), `litellm` CVE-2026-114612 and `msgpack` CVE-2026-114613. The 10th finding, `opentelemetry-api` CVE-2026-114603, is already accepted in `security-scan.yml` because every `google-adk` release caps that package below the fix
   - Each pin is the lowest release that clears its own package, so `litellm` stops at 1.100.4 instead of the latest 1.106.5, which needs `filelock<4` (we pin 4.2.4) and `boto3>=1.43.117` (we pin 1.43.85). No `pyproject.toml` range changes: all three versions were already inside the declared ranges
-  - `uv.lock` is a separate universal resolution, is not what the audit gate reads, and still carries the old versions
+  - `uv.lock` and `.github/requirements/pip-audit.txt` are separate resolutions that the audit gate does not read either. They carried the old versions as well and were cleared in the follow-up to this entry: `uv.lock` moves `authlib` and `msgpack` to the versions above plus `litellm` 1.102.0 → 1.102.2, and `pip-audit.txt` moves `msgpack` to 1.2.3
 
 ## [0.7.0] - 2026-09-22
 
