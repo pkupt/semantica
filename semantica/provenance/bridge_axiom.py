@@ -65,7 +65,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from ..utils.exceptions import ProvenanceRecordingError
 from ..utils.helpers import utc_now_iso
+from .manager import ProvenanceManager
 
 _APPLICABILITY_FIELDS = (
     "units",
@@ -236,6 +238,7 @@ class BridgeAxiom:
         input_entity: str,
         input_value: float,
         prov_manager: Optional[Any] = None,
+        require_provenance: bool = True,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -245,10 +248,16 @@ class BridgeAxiom:
             input_entity: Input entity identifier
             input_value: Input value to transform
             prov_manager: ProvenanceManager instance (optional)
+            require_provenance: If True (default), raise
+                ProvenanceRecordingError when a prov_manager is given and the
+                write fails. If False, return the transform with
+                provenance_recorded=False and provenance_error set instead.
             **kwargs: Additional parameters
             
         Returns:
-            Dictionary with result and provenance information. When the axiom
+            Dictionary with result and provenance information. Always includes
+            provenance_recorded (bool) and provenance_error (str or None);
+            provenance_recorded is False without a prov_manager. When the axiom
             records an applicability window, ``extrapolated`` says whether the
             input fell outside it and ``applicability_violations`` lists which
             bound was crossed, so a caller can report or reject the result
@@ -278,10 +287,43 @@ class BridgeAxiom:
         output_entity = f"{input_entity}_transformed_{self.axiom_id}"
         
         # Track provenance if manager provided
-        if prov_manager:
+        provenance_recorded = False
+        provenance_error: Optional[str] = None
+        # "is not None", not truthiness: a manager that defines __len__ (an
+        # empty store) is still a manager, and skipping it would report the
+        # write as never attempted instead of failing closed.
+        if prov_manager is not None:
+            metadata = {
+                # Caller extras first: the computed fields below describe what
+                # actually happened, so a keyword with the same name must not
+                # replace them. Otherwise apply(..., extrapolated=False) would
+                # record False in the audit trail while the result says True.
+                **kwargs,
+                "axiom_id": self.axiom_id,
+                "axiom_name": self.name,
+                "rule": self.rule,
+                "coefficient": self.coefficient,
+                "input_entity": input_entity,
+                "input_value": input_value,
+                "output_value": output_value,
+                "input_domain": self.input_domain,
+                "output_domain": self.output_domain,
+                "units": self.units,
+                "uncertainty": self.uncertainty,
+                "applicability_min": self.applicability_min,
+                "applicability_max": self.applicability_max,
+                "extrapolated": extrapolated,
+                "applicability_violations": violations,
+            }
+            # Only the exception type is reported, in the raised message and in
+            # provenance_error alike. The text of a storage failure can carry
+            # SQL and filesystem paths, and both strings reach logs and API
+            # responses; the original exception stays attached as __cause__.
+            failure: Optional[str] = None
+            cause: Optional[BaseException] = None
             try:
                 # Track the bridge axiom application
-                prov_manager.track_entity(
+                recorded = prov_manager.track_entity(
                     entity_id=output_entity,
                     source=self.source_doi,
                     entity_type="bridge_axiom_result",
@@ -289,33 +331,34 @@ class BridgeAxiom:
                     source_location=self.source_page,
                     source_quote=self.source_quote,
                     confidence=self.confidence,
-                    metadata={
-                        # Caller extras first: the computed fields below
-                        # describe what actually happened, so a keyword with
-                        # the same name must not replace them. Otherwise
-                        # apply(..., extrapolated=False) would record False in
-                        # the audit trail while the result says True.
-                        **kwargs,
-                        "axiom_id": self.axiom_id,
-                        "axiom_name": self.name,
-                        "rule": self.rule,
-                        "coefficient": self.coefficient,
-                        "input_entity": input_entity,
-                        "input_value": input_value,
-                        "output_value": output_value,
-                        "input_domain": self.input_domain,
-                        "output_domain": self.output_domain,
-                        "units": self.units,
-                        "uncertainty": self.uncertainty,
-                        "applicability_min": self.applicability_min,
-                        "applicability_max": self.applicability_max,
-                        "extrapolated": extrapolated,
-                        "applicability_violations": violations,
-                    }
+                    metadata=metadata,
                 )
-            except Exception:
-                pass  # Graceful failure
-        
+            except Exception as exc:
+                failure = type(exc).__name__
+                cause = exc
+            else:
+                # ProvenanceManager logs storage failures instead of raising:
+                # it returns None for a new entity, or a copy of the old entry
+                # when an update fails. Either way this application is not on
+                # record, so treat it as a failed write.
+                if isinstance(prov_manager, ProvenanceManager) and (
+                    recorded is None or recorded.metadata != metadata
+                ):
+                    failure = (
+                        "storage did not persist the entry "
+                        "(see the ProvenanceManager log)"
+                    )
+
+            if failure is None:
+                provenance_recorded = True
+            elif require_provenance:
+                raise ProvenanceRecordingError(
+                    f"Could not record provenance for {output_entity!r}: {failure}",
+                    entity_id=output_entity,
+                ) from cause
+            else:
+                provenance_error = failure
+
         return {
             "axiom_id": self.axiom_id,
             "axiom_name": self.name,
@@ -335,6 +378,8 @@ class BridgeAxiom:
             "applicability_max": self.applicability_max,
             "extrapolated": extrapolated,
             "applicability_violations": violations,
+            "provenance_recorded": provenance_recorded,
+            "provenance_error": provenance_error,
         }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -559,7 +604,13 @@ def trace_translation_chain(
             "layer": layer.get("layer"),
             "type": layer.get("type"),
             "value": layer.get("value"),
-            "source": layer.get("source")
+            "source": layer.get("source"),
+            # Both keys exist on every layer, whether or not it names an
+            # entity: a consumer that walks the trace should read "provenance
+            # unavailable" rather than trip over a KeyError on the layers that
+            # have no entity_id.
+            "provenance": None,
+            "provenance_error": None,
         }
 
         # A layer that recorded its applicability context keeps it in the
@@ -574,11 +625,11 @@ def trace_translation_chain(
         entity_id = layer.get("entity_id")
         if entity_id:
             try:
-                lineage = prov_manager.get_lineage(entity_id)
-                layer_trace["provenance"] = lineage
-            except Exception:
-                pass
-        
+                layer_trace["provenance"] = prov_manager.get_lineage(entity_id)
+            except Exception as exc:
+                # Type only, for the same reason as in BridgeAxiom.apply().
+                layer_trace["provenance_error"] = type(exc).__name__
+
         trace["layers"].append(layer_trace)
     
     return trace

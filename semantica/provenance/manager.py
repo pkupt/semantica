@@ -35,7 +35,7 @@ import threading
 
 from .schemas import ProvenanceEntry, SourceReference, AgentRecord, ActivityRecord
 from .storage import ProvenanceStorage, InMemoryStorage, SQLiteStorage
-from .integrity import compute_checksum, verify_checksum
+from .integrity import CHECKSUM_VERSION, compute_checksum, verify_checksum
 from ..utils.helpers import to_utc_datetime, utc_now_iso
 from ..utils.logging import get_logger
 
@@ -168,6 +168,11 @@ class ProvenanceManager:
         entry.sequence_id = (head[0] + 1) if head else 1
         entry.previous_checksum = head[1] if head else None
 
+        # Stamp the encoding version alongside the checksum so verification can
+        # dispatch per row instead of taking a caller-facing allow-legacy flag
+        # (issue #2136): rows written before this change carry no version, and
+        # verify_checksum() accepts either encoding on such a row.
+        entry.checksum_version = CHECKSUM_VERSION
         entry.checksum = compute_checksum(entry)
 
         try:
