@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking: `BridgeAxiom.apply()` returned normally when its provenance record was not written** (fixes #2137) by @pkupt
+  - **Why**: `apply()` swallowed every provenance failure with `except Exception: pass`, and `ProvenanceManager.track_entity()` reports a storage failure by returning `None` (or a copy of the previous entry on an update) instead of raising. Either way the transform came back as if it had been recorded, so a translation could have no audit record, or a stale one showing an earlier value
+  - **What changed**: when a `prov_manager` is passed and the record is not written, `apply()` raises `ProvenanceRecordingError` (new in `semantica.utils`, error code `SEM007`), and `create_translation_chain()` lets it propagate. `apply()` gains `require_provenance=True`; with `False` it returns the transform instead. Every result now carries `provenance_recorded` (`bool`) and `provenance_error` (`str` or `None`). `trace_translation_chain()` no longer drops a failed `get_lineage()`: the layer gets `provenance=None` and a `provenance_error`
+  - **Who is affected**: callers that pass a `prov_manager` whose writes can fail, such as SQLite storage given metadata that is not JSON-serializable, or a duck-typed manager without `track_entity`. Tests that pass `MagicMock(spec=ProvenanceManager)` as the manager now raise, because the mock does not return a provenance entry. Calls without a `prov_manager`, and calls whose write succeeds, behave as before
+  - **Migration**: to keep best-effort behaviour, pass `require_provenance=False` and check `result["provenance_recorded"]`. A chain fails as a whole; steps recorded before the failing one stay in the store. New tests in `tests/provenance/test_bridge_axiom.py`
+
 - **Relationship filtering on a `ContextGraph` rescanned the edge list for every node pair** (fixes #1927)
   - `edge_types_between` read every edge of a `ContextGraph` for each (node, neighbour) pair it classified, so `detect_communities_label_propagation` and `calculate_pagerank` with `relationship_types` were O(E^2): about 21 s each on a 6,000-edge graph. `build_edge_type_index` now indexes a `ContextGraph`'s edge list as well, and both callers build the index once per call (1.4 s and 0.09 s on the same graph). The per-pair answers are unchanged. New `tests/kg/test_context_graph_edge_type_index.py`
 
