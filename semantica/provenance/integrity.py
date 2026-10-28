@@ -20,8 +20,98 @@ License: MIT
 """
 
 import hashlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from .schemas import ProvenanceEntry
+
+
+# Checksum encoding version (issue #2136).
+#
+# v1 pasted the 16 field strings together with nothing between them, so two
+# records that differ only in where a field boundary falls hashed the same.
+# v2 length-prefixes every value and tags lists with their element count, so a
+# boundary cannot move. The version is recorded per row
+# (ProvenanceEntry.checksum_version) instead of being a caller-facing flag:
+# defaulting a flag to False would report every existing store as a broken
+# chain on upgrade while nothing had been tampered with, and defaulting it to
+# True would leave the collision open for good.
+CHECKSUM_VERSION = 2
+LEGACY_CHECKSUM_VERSION = 1
+
+# The hashed fields, in the fixed order both encodings use. entity_id is
+# deliberately absent; see compute_checksum().
+_CHECKSUM_FIELDS = (
+    ("entity_type", "text"),
+    ("activity_id", "text"),
+    ("agent_id", "text"),
+    ("agent_type", "text"),
+    ("source_document", "text"),
+    ("timestamp", "text"),
+    ("confidence", "float"),
+    ("parent_entity_id", "text"),
+    ("previous_version_id", "text"),
+    ("derived_from_id", "text"),
+    ("used_entities", "list"),
+    ("previous_checksum", "text"),
+    ("invalidated", "bool"),
+    ("invalidated_at_time", "text"),
+    ("invalidated_by", "text"),
+    ("invalidation_reason", "text"),
+)
+
+# Encoding tags. Every value is written as <tag><4-byte big-endian length>
+# <utf-8 bytes>; a list is written as <tag><count> then each element in the
+# same length-prefixed form, so ["a,b"] and ["a", "b"] cannot collide either.
+_TAG_SCALAR = b"\x01"
+_TAG_LIST = b"\x02"
+_V2_HEADER = b"prov-v2\x00"
+
+
+def _raw_field(entry: Any, name: str, default: Any) -> Any:
+    """Read a field from a dict or a dataclass, treating None as absent."""
+    value = entry.get(name) if isinstance(entry, dict) else getattr(entry, name, None)
+    return default if value is None else value
+
+
+def _checksum_field_values(entry: Any) -> List[Any]:
+    """
+    Return the hashed values in ``_CHECKSUM_FIELDS`` order.
+
+    Both the dict and the dataclass path go through this function, so the same
+    content always produces the same value vector. v1 did not: a None field
+    hashed as ``''`` through ``entry.get('x') or ''`` but as ``'None'`` through
+    ``f"{entry.x}"``, so identical records hashed differently depending on how
+    they were passed in.
+    """
+    values: List[Any] = []
+    for name, kind in _CHECKSUM_FIELDS:
+        if kind == "list":
+            values.append([str(item) for item in _raw_field(entry, name, [])])
+        elif kind == "float":
+            values.append(str(float(_raw_field(entry, name, 1.0))))
+        elif kind == "bool":
+            values.append(str(bool(_raw_field(entry, name, False))))
+        else:
+            values.append(str(_raw_field(entry, name, "")))
+    return values
+
+
+def _encode_fields(values: List[Any]) -> bytes:
+    """Encode a value vector so no two distinct vectors collide (issue #2136)."""
+    out = bytearray(_V2_HEADER)
+    for value in values:
+        if isinstance(value, list):
+            out += _TAG_LIST
+            out += len(value).to_bytes(4, "big")
+            for item in value:
+                encoded = item.encode("utf-8")
+                out += len(encoded).to_bytes(4, "big")
+                out += encoded
+        else:
+            encoded = value.encode("utf-8")
+            out += _TAG_SCALAR
+            out += len(encoded).to_bytes(4, "big")
+            out += encoded
+    return bytes(out)
 
 
 def compute_checksum(entry: Any) -> str:
@@ -71,7 +161,40 @@ def compute_checksum(entry: Any) -> str:
         >>> print(checksum)
         'a3b2c1d4e5f6...'
     """
-    # Concatenate critical fields for checksum (entity_id intentionally excluded, see docstring)
+    return hashlib.sha256(_encode_fields(_checksum_field_values(entry))).hexdigest()
+
+
+def checksum_version(entry: Any) -> int:
+    """
+    Return the checksum encoding version recorded on ``entry``.
+
+    Rows written before issue #2136 carry no version and are treated as v1, so
+    an existing store keeps verifying after upgrade without being re-hashed
+    and without a caller-facing flag.
+    """
+    raw = (
+        entry.get("checksum_version")
+        if isinstance(entry, dict)
+        else getattr(entry, "checksum_version", None)
+    )
+    if raw is None:
+        return LEGACY_CHECKSUM_VERSION
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return LEGACY_CHECKSUM_VERSION
+
+
+def compute_checksum_legacy(entry: Any) -> str:
+    """
+    Compute the v1 (field-concatenation) checksum, for rows written before
+    issue #2136.
+
+    That encoding is not injective — two records that differ only in where a
+    field boundary falls hash the same — so it is used only to verify rows
+    whose ``checksum_version`` is 1 or absent. New rows always get the v2
+    encoding from ``compute_checksum()``.
+    """
     if isinstance(entry, dict):
         used_entities = entry.get("used_entities") or []
         data = (
@@ -146,8 +269,12 @@ def verify_checksum(entry: Any, expected_checksum: Optional[str] = None) -> bool
     if expected_checksum is None:
         return False
     
-    current_checksum = compute_checksum(entry)
-    return current_checksum == expected_checksum
+    compute = (
+        compute_checksum
+        if checksum_version(entry) >= CHECKSUM_VERSION
+        else compute_checksum_legacy
+    )
+    return compute(entry) == expected_checksum
 
 
 def compute_data_checksum(data: str) -> str:
