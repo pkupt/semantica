@@ -1892,9 +1892,8 @@ def _ontology_input_graph(
     """Adapt a graph for OntologyGenerator's entity shape.
 
     Its property inference reads top-level keys and lists ``properties`` itself
-    as a control field. A graph read from a backend therefore produced an
-    ontology with no property shapes at all, and ``validate shacl`` checked the
-    classes while ignoring every attribute (#1814 review).
+    as a control field, so a graph read from a backend otherwise produced an
+    ontology with no properties at all (#1814 review).
     """
     return {
         "entities": [_flatten_properties(e) for e in graph.get("entities", [])],
@@ -4551,6 +4550,10 @@ def validate_shacl(cli_ctx: CLIContext, data: str, shapes: str,
             _jecho(payload)
         else:
             _pprint(cli_ctx, payload)
+        if not shacl_report.conforms:
+            # Exit non-zero like `pipeline validate`, so CI can gate on it
+            # without parsing the report.
+            raise SystemExit(1)
 
     _run_with_error_handling(_action)
 
@@ -4954,6 +4957,12 @@ def ontology_version(cli_ctx: CLIContext, storage_path: Optional[str],
         storage = storage_path or cli_ctx.config.get(
             "custom.ontology.version_storage_path"
         )
+        # Same check --storage gets from click.Path(exists=True): opening a
+        # missing path would create an empty SQLite file.
+        if storage and not Path(storage).is_file():
+            raise click.ClickException(
+                f"Ontology version store '{storage}' does not exist."
+            )
         manager = (
             OntologyVersionManager(storage_path=storage)
             if storage

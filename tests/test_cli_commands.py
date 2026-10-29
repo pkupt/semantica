@@ -2394,8 +2394,9 @@ class TestValidate:
             cli_module.main,
             ["validate", "shacl", data, "--shapes", shapes, "--json"],
         )
-        _ok(result)
-        payload = _json_output(result)
+        # Non-conforming data exits 1 so CI can gate on it.
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output.strip())
         assert payload["conforms"] is False
         assert payload["violation_count"] >= 1
 
@@ -2665,6 +2666,20 @@ class TestOntology:
         )
         assert result.exit_code == 2
         assert "does not exist" in _flatten(result.output)
+
+    def test_version_rejects_a_missing_configured_store(self, runner, tmp_path):
+        """The config key must not create an empty store either."""
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(
+            "custom:\n  ontology:\n"
+            f"    version_storage_path: {tmp_path / 'typo.db'}\n"
+        )
+        result = runner.invoke(
+            cli_module.main, ["--config", str(cfg), "ontology", "version", "--json"]
+        )
+        assert result.exit_code == 1
+        assert "does not exist" in _flatten(result.output)
+        assert not (tmp_path / "typo.db").exists()
 
     def test_version_hints_the_key_it_actually_reads(self, runner):
         result = runner.invoke(cli_module.main, ["ontology", "version"])
