@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`DomainOntologies` advertised legal, research and cybersecurity templates that did not exist** (fixes #1819) by @pkupt
+  - `get_domain_template("legal")`, `("research")` and `("cybersecurity")` returned a bare `None`, which surfaced in caller code as `AttributeError: 'NoneType' object has no attribute 'get'`. The three templates are now registered, in the same small hand-written style as `healthcare` and `finance`.
+  - `get_domain_template` still returns `None` for an unregistered domain, but now logs a warning listing the available domains so the miss is visible. New `tests/ontology/test_domain_ontologies.py`
+
 - **`tornado` was pinned at 6.5.10, which the audit job now flags three times** (fixes #2135) by @pkupt
   - `CVE-2026-115927`, `CVE-2026-116577` and `CVE-2026-116578` all resolve to `tornado==6.5.10`, and they are the only findings left in `requirements-ci.txt`. Because `security-scan` is a required check, they failed every pull request's run, and the scheduled scan on `main` failed for the same three
   - `requirements-ci.txt` and `uv.lock` now carry `tornado==6.6`, the first release with fixes for all three. Nothing else in either file moves: both were re-resolved with the committed pins as constraints, and the two CI freshness gates (`uv pip compile` against `requirements-ci.txt`, `uv lock --check`) pass unchanged

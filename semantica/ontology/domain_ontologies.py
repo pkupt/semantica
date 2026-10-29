@@ -240,6 +240,12 @@ class DomainOntologies:
                     "domain": ["Incident"],
                     "range": ["Asset"],
                 },
+                {
+                    "name": "indicates",
+                    "type": "object",
+                    "domain": ["Indicator"],
+                    "range": ["Malware"],
+                },
             ],
         }
 
@@ -251,7 +257,9 @@ class DomainOntologies:
             domain: Domain name
 
         Returns:
-            Domain template, or None when the domain is not registered
+            Domain template, or None when the domain is not registered.
+            A miss is logged as a warning listing the available domains, so
+            use ``list_domains()`` to check membership without logging.
         """
         template = self.domain_templates.get(domain.lower())
         if template is None:

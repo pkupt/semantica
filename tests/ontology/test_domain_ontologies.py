@@ -34,6 +34,15 @@ def test_create_domain_ontology_for_advertised_domain(domains, domain):
     assert ontology["properties"] == domains.get_domain_template(domain)["properties"]
 
 
+@pytest.mark.parametrize("domain", ADVERTISED_DOMAINS)
+def test_properties_reference_classes_in_the_same_template(domains, domain):
+    template = domains.get_domain_template(domain)
+    class_names = {cls["name"] for cls in template["classes"]}
+    for prop in template["properties"]:
+        assert set(prop["domain"]) <= class_names, prop["name"]
+        assert set(prop["range"]) <= class_names, prop["name"]
+
+
 def test_list_domains_covers_every_advertised_domain(domains):
     assert set(ADVERTISED_DOMAINS) <= set(domains.list_domains())
 
