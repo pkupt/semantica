@@ -4210,6 +4210,22 @@ def temporal_allen(
     _run_with_error_handling(_action)
 
 
+def _provenance_manager(cli_ctx: CLIContext) -> Any:
+    """Open the provenance store the CLI's commands share.
+
+    A configured ``provenance.storage_path`` wins; otherwise the CLI opens the
+    database the Explorer uses (``SEMANTICA_PROVENANCE_DB`` /
+    ``EXPLORER_PROVENANCE_DB``). Before this every command read a fresh
+    in-memory store and reported nothing (#1810).
+    """
+    from .provenance import ProvenanceManager, storage_path_from_env
+
+    storage_path = None
+    if not cli_ctx.config.get("provenance.storage_path"):
+        storage_path = storage_path_from_env()
+    return ProvenanceManager(storage_path=storage_path, config=cli_ctx.config.to_dict())
+
+
 @main.group(invoke_without_command=True)
 @click.pass_context
 def provenance(ctx: click.Context) -> None:
@@ -4234,8 +4250,7 @@ def provenance_lineage(cli_ctx: CLIContext, entity_id: str, depth: int, local_js
 
     def _action() -> None:
         try:
-            from .provenance import ProvenanceManager
-            pm = ProvenanceManager(config=cli_ctx.config.to_dict())
+            pm = _provenance_manager(cli_ctx)
             result = pm.lineage(entity_id, depth=depth)
         except ImportError as exc:
             raise click.ClickException(f"Provenance module not available: {exc}") from exc
@@ -4271,8 +4286,7 @@ def provenance_audit(cli_ctx: CLIContext, since: Optional[str], fmt: str,
             _dry(cli_ctx, "export audit log", since=since, format=fmt, output=output)
             return
         try:
-            from .provenance import ProvenanceManager
-            pm = ProvenanceManager(config=cli_ctx.config.to_dict())
+            pm = _provenance_manager(cli_ctx)
             result = pm.audit_log(since=since, format=fmt)
         except ImportError as exc:
             raise click.ClickException(f"Provenance module not available: {exc}") from exc
@@ -4311,8 +4325,7 @@ def provenance_export(cli_ctx: CLIContext, fmt: str, base_uri: Optional[str],
             _dry(cli_ctx, "export provenance", format=fmt, base_uri=base_uri, output=output)
             return
         try:
-            from .provenance import ProvenanceManager
-            pm = ProvenanceManager(config=cli_ctx.config.to_dict())
+            pm = _provenance_manager(cli_ctx)
             data = pm.export_prov(format=fmt, base_uri=base_uri)
         except ImportError as exc:
             raise click.ClickException(f"Provenance module not available: {exc}") from exc
@@ -4335,8 +4348,7 @@ def provenance_check(cli_ctx: CLIContext, strict: bool, local_json: bool) -> Non
 
     def _action() -> None:
         try:
-            from .provenance import ProvenanceManager
-            pm = ProvenanceManager(config=cli_ctx.config.to_dict())
+            pm = _provenance_manager(cli_ctx)
             result = pm.check(strict=strict)
         except ImportError as exc:
             raise click.ClickException(f"Provenance module not available: {exc}") from exc
@@ -4378,8 +4390,7 @@ def provenance_invalidate(cli_ctx: CLIContext, entity_id: str, agent_id: str,
             _dry(cli_ctx, "invalidate provenance entity", entity_id=entity_id, by=agent_id, reason=reason)
             return
         try:
-            from .provenance import ProvenanceManager
-            pm = ProvenanceManager(config=cli_ctx.config.to_dict())
+            pm = _provenance_manager(cli_ctx)
             result = pm.invalidate(entity_id, agent_id=agent_id, reason=reason)
         except ImportError as exc:
             raise click.ClickException(f"Provenance module not available: {exc}") from exc
@@ -4410,8 +4421,7 @@ def provenance_verify_chain(cli_ctx: CLIContext, local_json: bool) -> None:
 
     def _action() -> None:
         try:
-            from .provenance import ProvenanceManager
-            pm = ProvenanceManager(config=cli_ctx.config.to_dict())
+            pm = _provenance_manager(cli_ctx)
             result = pm.verify_chain()
         except ImportError as exc:
             raise click.ClickException(f"Provenance module not available: {exc}") from exc
@@ -4447,8 +4457,7 @@ def provenance_descendants(cli_ctx: CLIContext, entity_id: str, depth: Optional[
 
     def _action() -> None:
         try:
-            from .provenance import ProvenanceManager
-            pm = ProvenanceManager(config=cli_ctx.config.to_dict())
+            pm = _provenance_manager(cli_ctx)
             if depth is not None:
                 entries = [e.to_dict() for e in pm.trace_descendants(entity_id, max_depth=depth)]
                 result = {"entity_id": entity_id, "depth": depth, "entries": entries}

@@ -5840,6 +5840,22 @@ class TestProvenanceCliStorageEnv:
         _ok(result)
         assert json.loads(result.output.strip()) == []
 
+    def test_configured_storage_path_wins_over_the_env_var(
+        self, runner, monkeypatch, tmp_path
+    ):
+        configured = tmp_path / "configured.db"
+        self._seed_db(configured)
+        monkeypatch.setenv("SEMANTICA_PROVENANCE__STORAGE_PATH", str(configured))
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(tmp_path / "other.db"))
+
+        result = runner.invoke(
+            cli_module.main, ["provenance", "audit", "--format", "json", "--json"]
+        )
+        _ok(result)
+        entries = json.loads(result.output.strip())
+        assert [e["entity_id"] for e in entries] == ["ent1", "ent2"]
+        assert not (tmp_path / "other.db").exists()
+
 
 class _FakeUrlopenResponse:
     """Minimal context-manager response for a stubbed urllib.request.urlopen."""
