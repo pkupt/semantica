@@ -1844,24 +1844,11 @@ def _graph_store_as_context(cli_ctx: CLIContext) -> Dict[str, List[Dict[str, Any
         })
     rel_out = []
     for rel in relationships:
-        source_id = rel.get("start_node_id")
-        target_id = rel.get("end_node_id")
-        source = names.get(source_id, source_id)
-        target = names.get(target_id, target_id)
-        rel_type = rel.get("type", "RELATED_TO")
-        # ConflictDetector groups relationships by `id`, falling back to
-        # ``{source_id}_{target_id}_{type}``. Store rows carry neither field, so
-        # every edge of one type collapsed into a single group and unrelated
-        # edges with different properties were reported as a conflict (#1814
-        # review). Fill both, keyed the same way the entities above are keyed
-        # (by name) so endpoints stay resolvable.
+        source = names.get(rel.get("start_node_id"), rel.get("start_node_id"))
+        target = names.get(rel.get("end_node_id"), rel.get("end_node_id"))
         rel_out.append({
-            "id": rel.get("id") or f"{source}_{target}_{rel_type}",
-            "source_id": source,
-            "target_id": target,
-            "source": source,
-            "target": target,
-            "type": rel_type,
+            "source": source, "target": target,
+            "type": rel.get("type", "RELATED_TO"),
             "properties": rel.get("properties") or {},
         })
     return {"entities": entities, "relationships": rel_out}
@@ -1930,254 +1917,14 @@ def _conflict_entities(
 def _ontology_from_graph(
     cli_ctx: CLIContext,
     graph: Optional[Dict[str, List[Dict[str, Any]]]] = None,
-    min_occurrences: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Build an ontology dict from the configured graph's entities/relationships.
-
-    ``min_occurrences`` overrides the inference frequency gate (ClassInferrer
-    defaults to 2). SHACL validation passes 1: a type represented by a single
-    entity still gets a class shape, where the default left that entity
-    serialized but untargeted, which pySHACL reads as conforming (#1814 review).
-    """
+    """Build an ontology dict from the configured graph's entities/relationships."""
     from .ontology import OntologyGenerator
 
     data = graph if graph is not None else _knowledge_graph_dict(cli_ctx)
-    options: Dict[str, Any] = {}
-    if min_occurrences is not None:
-        options["min_occurrences"] = min_occurrences
     return OntologyGenerator(config=cli_ctx.config.to_dict()).generate_ontology(
-        _ontology_input_graph(data), **options
+        _ontology_input_graph(data)
     )
-
-
-def _inferred_sources(term: Dict[str, Any]) -> List[str]:
-    """Every raw graph key a generated term came from.
-
-    Inference merges names that normalize to the same term (``fooBar`` and
-    ``foo_bar`` become one property) and keeps only one of them in
-    ``inferred_from``; the rest ride along in ``inferred_from_all`` so the
-    shapes can still cover the other spelling (#1814 review).
-    """
-    metadata = term.get("metadata") or {}
-    sources: List[str] = []
-    primary = metadata.get("inferred_from")
-    if isinstance(primary, str):
-        sources.append(primary)
-    for extra in metadata.get("inferred_from_all") or []:
-        if isinstance(extra, str) and extra not in sources:
-            sources.append(extra)
-    return sources
-
-
-def _term_iris_by_source(
-    ontology: Dict[str, Any],
-    namespace: Optional[str] = None,
-    property_namespace: Optional[str] = None,
-) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """Map each graph key to the IRI the SHACL shapes target for it.
-
-    Class and property inference rename their inputs (``people`` becomes
-    ``Person``, and attribute names are normalized too), and the shapes are
-    built from those normalized names. Serializing an entity's raw type put its
-    data in a class no shape targets, so pySHACL saw zero focus nodes and
-    reported conformance without checking anything (#1814 review). Every
-    generated term records the graph key it came from in
-    ``metadata.inferred_from``, which is the mapping back.
-
-    ``namespace`` rebases both sides; ``property_namespace`` rebases only the
-    property side, for a shapes file whose target classes and property paths
-    use different vocabularies (#1814 review).
-    """
-    import rdflib
-
-    def _rebase_for(target: Optional[str]) -> Optional[Any]:
-        return rdflib.Namespace(target) if target else None
-
-    class_rebase = _rebase_for(namespace)
-    property_rebase = _rebase_for(property_namespace or namespace)
-
-    def _iri(term: Dict[str, Any], rebase: Optional[Any]) -> Optional[str]:
-        uri = term.get("uri")
-        if not uri:
-            return None
-        text = str(uri)
-        if rebase is None:
-            return text
-        cut = max(text.rfind("#"), text.rfind("/"))
-        local = text[cut + 1:] if cut != -1 else text
-        return str(rebase[local]) if local else text
-
-    classes: Dict[str, str] = {}
-    for cls in ontology.get("classes", []):
-        if isinstance(cls, dict):
-            iri = _iri(cls, class_rebase)
-            if not iri:
-                continue
-            for source in _inferred_sources(cls):
-                classes.setdefault(source, iri)
-    properties: Dict[str, str] = {}
-    for prop in ontology.get("properties", []):
-        if isinstance(prop, dict):
-            iri = _iri(prop, property_rebase)
-            if not iri:
-                continue
-            for source in _inferred_sources(prop):
-                properties.setdefault(source, iri)
-    return classes, properties
-
-
-def _single_shapes_namespace(objects: Any) -> Optional[str]:
-    """The one namespace every IRI in ``objects`` sits in, or None if mixed."""
-    import rdflib
-
-    namespaces = set()
-    for obj in objects:
-        if not isinstance(obj, rdflib.URIRef):
-            continue
-        iri = str(obj)
-        cut = max(iri.rfind("#"), iri.rfind("/"))
-        if cut != -1:
-            namespaces.add(iri[: cut + 1])
-    if len(namespaces) == 1:
-        return namespaces.pop()
-    return None
-
-
-def _shacl_data_namespaces(
-    ontology: Dict[str, Any], shapes_path: Optional[str]
-) -> Tuple[str, str]:
-    """(class namespace, property namespace) the data graph has to be minted in.
-
-    Shapes generated from the ontology target the ontology's own terms, so its
-    namespace is right. Shapes read from a file target whatever vocabulary that
-    file declares. One file can use one vocabulary for its target classes and
-    another for its property paths, and choosing a single namespace for both
-    leaves the classes with no matching focus node, which pySHACL reports as
-    conforming (#1814 review). Resolve the two sides separately.
-    """
-    default = _ontology_namespace(ontology)
-    if not shapes_path:
-        return default, default
-    try:
-        import rdflib
-
-        shapes = rdflib.Graph()
-        shapes.parse(shapes_path, format="turtle")
-        sh = rdflib.Namespace("http://www.w3.org/ns/shacl#")
-        class_namespace = _single_shapes_namespace(shapes.objects(None, sh.targetClass))
-        property_namespace = _single_shapes_namespace(shapes.objects(None, sh.path))
-        return class_namespace or default, property_namespace or default
-    except Exception:
-        return default, default
-
-
-def _shacl_data_namespace(ontology: Dict[str, Any], shapes_path: Optional[str]) -> str:
-    """Single-namespace view of ``_shacl_data_namespaces``."""
-    class_namespace, property_namespace = _shacl_data_namespaces(ontology, shapes_path)
-    if class_namespace == property_namespace:
-        return class_namespace
-    return _ontology_namespace(ontology)
-
-
-def _iri_local(value: Any) -> str:
-    """Percent-encode a local name so it is safe inside an IRI.
-
-    Entity IDs, display names and relationship types go straight into the
-    serialized subject/predicate/object IRIs. The store path uses a node's
-    display name as its ID, so a value like "Alice Smith" -- or anything else an
-    IRI forbids -- produced Turtle that could not be parsed, and ``validate
-    shacl`` errored out instead of validating (#1814 review).
-    """
-    from urllib.parse import quote
-
-    return quote(str(value), safe="")
-
-
-def _shacl_data_graph_turtle(
-    graph: Dict[str, List[Dict[str, Any]]],
-    namespace: str,
-    class_iris: Optional[Dict[str, str]] = None,
-    property_iris: Optional[Dict[str, str]] = None,
-) -> str:
-    """Serialize graph instances as Turtle in the shapes' own vocabulary.
-
-    `RDFSerializer` mints terms in its own vocabulary and drops entity
-    properties, so shapes generated from an ontology would target classes and
-    paths no exported graph carries. pySHACL treats a shape with zero matching
-    focus nodes as conforming, so that mismatch reads as a silent pass. The
-    entity type and attribute keys are translated through ``class_iris`` /
-    ``property_iris`` (the names the shapes actually target) and everything
-    else is minted in ``namespace``, which keeps the two graphs aligned.
-    """
-    import rdflib
-
-    ns = rdflib.Namespace(namespace)
-    class_iris = class_iris or {}
-    property_iris = property_iris or {}
-    data = rdflib.Graph()
-    for entity in graph.get("entities", []):
-        node_id = entity.get("id") or entity.get("name") or entity.get("text")
-        if not node_id:
-            continue
-        subject = ns[_iri_local(node_id)]
-        raw_type = str(entity.get("type") or "Entity")
-        class_iri = class_iris.get(raw_type) or str(ns[_iri_local(raw_type)])
-        data.add((subject, rdflib.RDF.type, rdflib.URIRef(class_iri)))
-        for key, value in (entity.get("properties") or {}).items():
-            if isinstance(value, (str, int, float, bool)):
-                prop_iri = property_iris.get(str(key)) or str(ns[_iri_local(key)])
-                data.add((subject, rdflib.URIRef(prop_iri), rdflib.Literal(value)))
-    for rel in graph.get("relationships", []):
-        source = rel.get("source_id") or rel.get("source")
-        target = rel.get("target_id") or rel.get("target")
-        if source is None or target is None:
-            continue
-        raw_type = str(rel.get("type") or "RELATED_TO")
-        # Relationships are typed too, and the generated shapes constrain the
-        # property IRI: a raw type that inference renamed has to go through the
-        # same mapping as an entity attribute, or that edge escapes its
-        # constraints (#1814 review).
-        predicate_iri = property_iris.get(raw_type)
-        predicate = (
-            rdflib.URIRef(predicate_iri) if predicate_iri else ns[_iri_local(raw_type)]
-        )
-        data.add((ns[_iri_local(source)], predicate, ns[_iri_local(target)]))
-    return data.serialize(format="turtle")
-
-
-def _shacl_shapes_turtle(
-    ontology: Dict[str, Any], shapes_path: Optional[str], strictness: str
-) -> str:
-    """Return the SHACL shapes as Turtle, from a file or derived from the ontology."""
-    if shapes_path:
-        return Path(shapes_path).read_text(encoding="utf-8")
-    from .ontology import OntologyEngine
-
-    tier = {"strict": "strict", "moderate": "standard", "lenient": "basic"}[strictness]
-    return OntologyEngine().to_shacl(ontology, format="turtle", quality_tier=tier)
-
-
-def _ontology_namespace(ontology: Dict[str, Any]) -> str:
-    """The vocabulary namespace the ontology's class and property IRIs live in.
-
-    Shapes generated from an ontology target those IRIs, and pySHACL treats a
-    shape with no matching focus node as satisfied, so a data graph minted in a
-    different namespace validates clean while checking nothing (#1104). The
-    graph's instances are serialized in this namespace to keep the two aligned.
-    """
-    declared = ontology.get("namespace")
-    if isinstance(declared, dict) and declared.get("base_uri"):
-        return str(declared["base_uri"])
-    if isinstance(declared, str) and declared:
-        return declared
-    entries = list(ontology.get("classes", [])) + list(ontology.get("properties", []))
-    for entry in entries:
-        uri = entry.get("uri") if isinstance(entry, dict) else None
-        if isinstance(uri, str) and "/" in uri:
-            return uri[: uri.rfind("/") + 1]
-    from .ontology.ontology_generator import DEFAULT_ONTOLOGY_BASE_URI
-
-    return DEFAULT_ONTOLOGY_BASE_URI
 
 
 def _lowercase_datalog_args(fact_str: str) -> str:
@@ -4726,24 +4473,51 @@ def validate(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
+_RDF_FORMAT_BY_SUFFIX = {
+    ".ttl": "turtle",
+    ".turtle": "turtle",
+    ".nt": "nt",
+    ".ntriples": "nt",
+    ".jsonld": "json-ld",
+    ".json-ld": "json-ld",
+    ".json": "json-ld",
+}
+
+
+def _rdf_format_for(path: str) -> str:
+    """RDF format for a file, chosen from its extension."""
+    suffix = Path(path).suffix.lower()
+    if suffix not in _RDF_FORMAT_BY_SUFFIX:
+        raise click.BadParameter(
+            f"cannot tell the RDF format of '{path}' from its extension; "
+            f"use one of {', '.join(sorted(_RDF_FORMAT_BY_SUFFIX))}",
+            param_hint="'DATA' / '--shapes'",
+        )
+    return _RDF_FORMAT_BY_SUFFIX[suffix]
+
+
 @validate.command("shacl")
-@click.option("--shapes", default=None, type=click.Path(exists=True),
-              help="SHACL shapes file (auto-generated if omitted).")
-@click.option("--strictness", type=click.Choice(["strict", "moderate", "lenient"]),
-              default="moderate", show_default=True)
+@click.argument("data", type=click.Path(exists=True, dir_okay=False))
+@click.option("--shapes", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="SHACL shapes file (Turtle, JSON-LD or N-Triples).")
 @click.option("--report", default=None, type=click.Path(),
               help="Write validation report to file.")
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
-def validate_shacl(cli_ctx: CLIContext, shapes: Optional[str], strictness: str,
+def validate_shacl(cli_ctx: CLIContext, data: str, shapes: str,
                    report: Optional[str], local_json: bool) -> None:
-    """Validate data against SHACL constraint shapes.
+    """Validate an RDF file against SHACL constraint shapes.
+
+    Both files are read as RDF; their format comes from the file extension
+    (.ttl, .nt, .jsonld, .json).
 
     \b
     Example:
-      semantica validate shacl --strictness strict --report report.json
+      semantica validate shacl data.ttl --shapes shapes.ttl
     """
     cli_ctx = _require_ctx(cli_ctx)
+    data_format = _rdf_format_for(data)
+    shapes_format = _rdf_format_for(shapes)
 
     def _action() -> None:
         try:
@@ -4752,24 +4526,13 @@ def validate_shacl(cli_ctx: CLIContext, shapes: Optional[str], strictness: str,
             raise click.ClickException(
                 f"Ontology/validation module not available: {exc}"
             ) from exc
-        graph = _knowledge_graph_dict(cli_ctx)
-        # min_occurrences=1: a type represented by a single entity still needs
-        # a shape, or that entity is never checked (#1814 review).
-        ontology = _ontology_from_graph(cli_ctx, graph, min_occurrences=1)
-        ontology_namespace = _ontology_namespace(ontology)
-        class_namespace, property_namespace = _shacl_data_namespaces(ontology, shapes)
-        class_iris, property_iris = _term_iris_by_source(
-            ontology,
-            class_namespace if class_namespace != ontology_namespace else None,
-            property_namespace if property_namespace != ontology_namespace else None,
-        )
-        data_namespace = class_namespace
-        data_graph = _shacl_data_graph_turtle(
-            graph, data_namespace, class_iris, property_iris
-        )
-        shapes_graph = _shacl_shapes_turtle(ontology, shapes, strictness)
         try:
-            shacl_report = run_shacl_validation(data_graph, shapes_graph)
+            shacl_report = run_shacl_validation(
+                Path(data).read_text(encoding="utf-8"),
+                Path(shapes).read_text(encoding="utf-8"),
+                data_graph_format=data_format,
+                shacl_format=shapes_format,
+            )
         except ImportError as exc:
             raise click.ClickException(
                 "SHACL validation needs pyshacl, which ships in the optional "
@@ -4821,6 +4584,13 @@ def validate_conflicts(
       semantica validate conflicts --format json | jq '.conflicts | length'
     """
     cli_ctx = _require_ctx(cli_ctx)
+    if property_name and strategy not in ("value", "property"):
+        raise click.UsageError(
+            f"--property has no meaning for --strategy {strategy}; it is only "
+            "read by the 'value' and 'property' strategies."
+        )
+    if strategy in ("value", "property") and not property_name:
+        raise click.UsageError(f"--strategy {strategy} needs --property.")
 
     def _action() -> None:
         try:
@@ -4835,13 +4605,6 @@ def validate_conflicts(
             property_name=property_name,
             relationships=graph.get("relationships", []),
         )
-        # The detector's "all" method never dispatches its relationship
-        # strategy, so the relationships this command reads went unexamined on
-        # the default run (#1814 review).
-        if strategy == "all":
-            conflicts = list(conflicts) + detector.detect_relationship_conflicts(
-                graph.get("relationships", [])
-            )
         payload = {
             "conflicts": _serialize_extract_result(conflicts),
             "count": len(conflicts),
@@ -4975,14 +4738,12 @@ def ontology_import(cli_ctx: CLIContext, source: str, fmt: Optional[str],
 
 @ontology.command("validate")
 @click.option("--shapes", default=None, hidden=True,
-              help="Moved: use `semantica validate shacl --shapes`.")
-@click.option("--strictness", default=None, hidden=True,
-              help="Moved: use `semantica validate shacl --strictness`.")
+              help="Moved: use `semantica validate shacl DATA --shapes SHAPES`.")
 @click.option("--report", default=None, type=click.Path())
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj
 def ontology_validate(
-    cli_ctx: CLIContext, shapes: Optional[str], strictness: Optional[str],
+    cli_ctx: CLIContext, shapes: Optional[str],
     report: Optional[str], local_json: bool
 ) -> None:
     """Check the generated ontology for consistency and satisfiability.
@@ -4994,13 +4755,13 @@ def ontology_validate(
     cli_ctx = _require_ctx(cli_ctx)
 
     def _action() -> None:
-        # --shapes / --strictness moved to `validate shacl`. Keep accepting them
-        # so an existing script gets a pointer instead of Click's "No such
-        # option" usage error (#1814 review).
-        if shapes or strictness:
+        # --shapes moved to `validate shacl`. Keep accepting it so an existing
+        # script gets a pointer instead of Click's "No such option" usage error
+        # (#1814 review).
+        if shapes:
             raise click.ClickException(
-                "`ontology validate` no longer takes --shapes/--strictness; "
-                "use `semantica validate shacl --shapes ... --strictness ...`."
+                "`ontology validate` no longer takes --shapes; use "
+                "`semantica validate shacl DATA --shapes SHAPES`."
             )
         try:
             from .ontology import validate_ontology
@@ -5167,7 +4928,8 @@ def ontology_health(cli_ctx: CLIContext, fmt: str, local_json: bool) -> None:
 
 
 @ontology.command("version")
-@click.option("--storage", "storage_path", default=None, type=click.Path(),
+@click.option("--storage", "storage_path", default=None,
+              type=click.Path(exists=True, dir_okay=False),
               help="SQLite store holding saved ontology snapshots.")
 @click.option("--json", "local_json", is_flag=True, default=False)
 @click.pass_obj

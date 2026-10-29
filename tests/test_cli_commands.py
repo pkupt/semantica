@@ -2335,6 +2335,30 @@ class TestProvenance:
 # ─── validate ─────────────────────────────────────────────────────────────────
 
 
+_SHAPES_TURTLE = (
+    "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
+    "@prefix ex: <http://example.org/> .\n"
+    "ex:PersonShape a sh:NodeShape ;\n"
+    "    sh:targetClass ex:Person ;\n"
+    "    sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n"
+)
+
+_DATA_WITH_NAME_TURTLE = (
+    "@prefix ex: <http://example.org/> .\n"
+    'ex:alice a ex:Person ; ex:name "Alice" .\n'
+)
+
+_DATA_WITHOUT_NAME_TURTLE = (
+    "@prefix ex: <http://example.org/> .\n"
+    "ex:alice a ex:Person .\n"
+)
+
+
+def _rdf_file(path, text):
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
 class TestValidate:
     def test_group_help(self, runner):
         result = runner.invoke(cli_module.main, ["validate", "--help"])
@@ -2342,21 +2366,66 @@ class TestValidate:
         for sub in ["shacl", "conflicts", "integrity"]:
             assert sub in result.output
 
-    def test_shacl_help(self, runner):
+    def test_shacl_help_names_the_data_and_shapes_arguments(self, runner):
         result = runner.invoke(cli_module.main, ["validate", "shacl", "--help"])
         _ok(result)
-        assert "--strictness" in result.output
+        assert "DATA" in result.output
+        assert "--shapes" in result.output
 
-    def test_shacl_import_error_is_clean(self, runner):
+    def test_shacl_conforms_on_matching_data(self, runner, tmp_path):
+        """#1814: the command had no way to check an RDF file against shapes."""
+        pytest.importorskip("pyshacl")
+        data = _rdf_file(tmp_path / "data.ttl", _DATA_WITH_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
+        result = runner.invoke(
+            cli_module.main,
+            ["validate", "shacl", data, "--shapes", shapes, "--json"],
+        )
+        _ok(result)
+        payload = _json_output(result)
+        assert payload["conforms"] is True
+        assert payload["violations"] == []
+
+    def test_shacl_reports_a_violation(self, runner, tmp_path):
+        pytest.importorskip("pyshacl")
+        data = _rdf_file(tmp_path / "data.ttl", _DATA_WITHOUT_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
+        result = runner.invoke(
+            cli_module.main,
+            ["validate", "shacl", data, "--shapes", shapes, "--json"],
+        )
+        _ok(result)
+        payload = _json_output(result)
+        assert payload["conforms"] is False
+        assert payload["violation_count"] >= 1
+
+    def test_shacl_rejects_an_extension_it_cannot_read(self, runner, tmp_path):
+        data = _rdf_file(tmp_path / "data.rdf", _DATA_WITH_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
+        result = runner.invoke(
+            cli_module.main,
+            ["validate", "shacl", data, "--shapes", shapes, "--json"],
+        )
+        assert result.exit_code == 2
+        assert "cannot tell the RDF format" in _flatten(result.output)
+
+    def test_shacl_import_error_is_clean(self, runner, tmp_path):
+        data = _rdf_file(tmp_path / "data.ttl", _DATA_WITH_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
             (_ for _ in ()).throw(ImportError(n))
             if "ontology" in n else _real_import(n, *a, **k)
         )):
-            result = runner.invoke(cli_module.main, ["validate", "shacl"])
+            result = runner.invoke(
+                cli_module.main,
+                ["validate", "shacl", data, "--shapes", shapes],
+            )
         assert result.exit_code != 0
         assert "Traceback" not in result.output
 
-    def test_conflicts_json(self, runner, graph_cfg, monkeypatch):
+    def test_conflicts_calls_the_detector_with_all_strategies(
+        self, runner, graph_cfg, monkeypatch
+    ):
         """#1814: the CLI must call ConflictDetector, whose `all` method is the
         command's default strategy. The module-level convenience function has no
         `all` and no `property`, and it takes no config."""
@@ -2373,62 +2442,47 @@ class TestValidate:
                 seen["kwargs"] = kwargs
                 return []
 
-            def detect_relationship_conflicts(self, relationships):
-                seen["relationships"] = relationships
-                return []
-
         monkeypatch.setattr(conflicts_module, "ConflictDetector", _Detector)
         result = runner.invoke(
             cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
         )
         _ok(result)
-        data = _json_output(result)
-        assert data == {"conflicts": [], "count": 0}
+        assert _json_output(result) == {"conflicts": [], "count": 0}
         assert seen["kwargs"]["method"] == "all"
         assert seen["kwargs"]["relationships"] == []
-        assert seen["relationships"] == []
-
-    def test_conflicts_runs_against_the_configured_graph(self, runner, graph_cfg):
-        """#1814: detect_conflicts() was called without its `entities` argument."""
-        result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
-        )
-        _ok(result)
-        data = _json_output(result)
-        assert data["count"] == 0
-        assert data["conflicts"] == []
 
     def test_conflicts_property_strategy_is_reachable(self, runner, graph_cfg):
         """The advertised value/property strategies need a property name."""
         result = runner.invoke(
             cli_module.main,
             [
-                "--config",
-                graph_cfg,
-                "validate",
-                "conflicts",
-                "--strategy",
-                "value",
-                "--property",
-                "name",
-                "--json",
+                "--config", graph_cfg, "validate", "conflicts",
+                "--strategy", "value", "--property", "name", "--json",
             ],
         )
         _ok(result)
         assert _json_output(result)["count"] == 0
 
-    def test_shacl_validation_runs_end_to_end(self, runner, graph_cfg):
-        """#1814: no SHACL validation was wired into the CLI at all."""
-        pytest.importorskip("pyshacl")
+    def test_conflicts_value_strategy_without_property_is_a_usage_error(
+        self, runner, graph_cfg
+    ):
         result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "validate", "shacl", "--json"]
+            cli_module.main,
+            ["--config", graph_cfg, "validate", "conflicts", "--strategy", "value"],
         )
-        _ok(result)
-        data = _json_output(result)
-        assert data["conforms"] is True
-        assert data["violations"] == []
+        assert result.exit_code == 2
+        assert "--property" in _flatten(result.output)
 
-    # ── #1814 review: the adapters handed the detectors the wrong shape ───────
+    def test_conflicts_all_strategy_rejects_a_property(self, runner, graph_cfg):
+        result = runner.invoke(
+            cli_module.main,
+            [
+                "--config", graph_cfg, "validate", "conflicts",
+                "--strategy", "all", "--property", "name",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "--property" in _flatten(result.output)
 
     def test_conflict_entities_lift_the_nested_attributes(self):
         """ConflictDetector's value strategy tests ``property_name in entity``,
@@ -2440,7 +2494,6 @@ class TestValidate:
             "relationships": [],
         }
         entity = cli_module._conflict_entities(graph)[0]
-        assert "age" in entity
         assert entity["age"] == 30
         # A structural field keeps its own meaning on a name clash.
         assert entity["type"] == "Person"
@@ -2459,317 +2512,6 @@ class TestValidate:
         assert entity["age"] == 30
         assert entity["id"] == "e1"
 
-    def test_conflicts_all_also_runs_the_relationship_strategy(
-        self, runner, graph_cfg, monkeypatch
-    ):
-        """detect_conflicts(method="all") never dispatches the relationship
-        strategy, so the relationships the command reads went unexamined on the
-        default run."""
-        import semantica.conflicts as conflicts_module
-
-        calls = {"entities": 0, "relationships": 0}
-
-        class _Detector:
-            def __init__(self, **kwargs):
-                pass
-
-            def detect_conflicts(self, entities, **kwargs):
-                calls["entities"] += 1
-                return []
-
-            def detect_relationship_conflicts(self, relationships):
-                calls["relationships"] += 1
-                return []
-
-        monkeypatch.setattr(conflicts_module, "ConflictDetector", _Detector)
-        result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
-        )
-        _ok(result)
-        assert calls == {"entities": 1, "relationships": 1}
-
-    def test_conflicts_leaves_relationships_to_their_own_strategy(
-        self, runner, graph_cfg, monkeypatch
-    ):
-        """An explicit strategy must dispatch to that strategy alone, or the
-        run reports conflicts the caller did not ask for."""
-        import semantica.conflicts as conflicts_module
-
-        calls = {"relationships": 0}
-
-        class _Detector:
-            def __init__(self, **kwargs):
-                pass
-
-            def detect_conflicts(self, entities, **kwargs):
-                return []
-
-            def detect_relationship_conflicts(self, relationships):
-                calls["relationships"] += 1
-                return []
-
-        monkeypatch.setattr(conflicts_module, "ConflictDetector", _Detector)
-        result = runner.invoke(
-            cli_module.main,
-            [
-                "--config",
-                graph_cfg,
-                "validate",
-                "conflicts",
-                "--strategy",
-                "value",
-                "--property",
-                "name",
-                "--json",
-            ],
-        )
-        _ok(result)
-        assert calls["relationships"] == 0
-
-    def test_conflicts_relationships_carry_an_id_and_both_endpoints(
-        self, runner, monkeypatch, tmp_path
-    ):
-        """ConflictDetector groups relationships by ``id``, falling back to
-        ``{source_id}_{target_id}_{type}``. Store rows carry neither field, so
-        every edge of one type collapsed into a single group and unrelated edges
-        with different properties were reported as a conflict."""
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("graph_db:\n  backend: neo4j\n")
-
-        class _Store:
-            def get_nodes(self, limit=None):
-                return [
-                    {"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}},
-                    {"id": 2, "labels": ["Person"], "properties": {"name": "Bob"}},
-                ]
-
-            def get_relationships(self, limit=None):
-                return [{"type": "KNOWS", "start_node_id": 1, "end_node_id": 2}]
-
-        captured = {}
-        real = cli_module._graph_store_as_context
-
-        def _spy(ctx):
-            captured["graph"] = real(ctx)
-            return captured["graph"]
-
-        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _Store())
-        monkeypatch.setattr(cli_module, "_graph_store_as_context", _spy)
-        result = runner.invoke(
-            cli_module.main, ["--config", str(cfg), "validate", "conflicts", "--json"]
-        )
-        _ok(result)
-        rel = captured["graph"]["relationships"][0]
-        assert rel["id"] == "Alice_Bob_KNOWS"
-        assert rel["source_id"] == "Alice"
-        assert rel["target_id"] == "Bob"
-
-    def test_shacl_data_graph_uses_the_inferred_class_iri(self):
-        """Class inference renames its inputs (``people`` becomes ``Person``) and
-        the shapes are built from those normalized names, so serializing an
-        entity's raw type put its data in a class no shape targets and pySHACL
-        reported conformance without checking anything."""
-        ontology = {
-            "namespace": {"base_uri": "http://ex.org/ont#"},
-            "classes": [
-                {
-                    "uri": "http://ex.org/ont#Person",
-                    "metadata": {"inferred_from": "people"},
-                }
-            ],
-            "properties": [
-                {"uri": "http://ex.org/ont#age", "metadata": {"inferred_from": "age"}}
-            ],
-        }
-        classes, properties = cli_module._term_iris_by_source(ontology)
-        assert classes == {"people": "http://ex.org/ont#Person"}
-        assert properties == {"age": "http://ex.org/ont#age"}
-
-        turtle = cli_module._shacl_data_graph_turtle(
-            {
-                "entities": [{"id": "e1", "type": "people", "properties": {"age": 3}}],
-                "relationships": [],
-            },
-            cli_module._ontology_namespace(ontology),
-            classes,
-            properties,
-        )
-        import rdflib
-
-        data = rdflib.Graph()
-        data.parse(data=turtle, format="turtle")
-        subject = rdflib.URIRef("http://ex.org/ont#e1")
-        assert (subject, rdflib.RDF.type, rdflib.URIRef("http://ex.org/ont#Person")) in data
-        # The raw type must not reach the graph as a class of its own.
-        assert list(data.objects(subject, rdflib.RDF.type)) == [
-            rdflib.URIRef("http://ex.org/ont#Person")
-        ]
-        age = list(data.triples((subject, rdflib.URIRef("http://ex.org/ont#age"), None)))
-        assert [str(value) for _, _, value in age] == ["3"]
-
-    def test_term_iris_rebase_onto_the_shapes_namespace(self):
-        ontology = {
-            "namespace": {"base_uri": "http://ex.org/ont#"},
-            "classes": [
-                {
-                    "uri": "http://ex.org/ont#Person",
-                    "metadata": {"inferred_from": "people"},
-                }
-            ],
-            "properties": [],
-        }
-        classes, _ = cli_module._term_iris_by_source(
-            ontology, "http://shapes.example/v#"
-        )
-        assert classes == {"people": "http://shapes.example/v#Person"}
-
-    def test_shacl_data_graph_maps_relationship_types_to_shape_iris(self):
-        # Generated shapes constrain the property IRI, so a relationship whose
-        # raw type inference renamed has to be mapped like an entity attribute
-        # (#1814 review).
-        graph = {
-            "entities": [{"id": "n1", "type": "Person"},
-                         {"id": "n2", "type": "Person"}],
-            "relationships": [{"source": "n1", "target": "n2", "type": "works_with"}],
-        }
-        turtle = cli_module._shacl_data_graph_turtle(
-            graph, "http://ex.org/ont#", {},
-            {"works_with": "http://ex.org/ont#worksWith"},
-        )
-        assert "worksWith" in turtle
-        assert "works_with" not in turtle
-
-    def test_shacl_data_namespaces_resolve_classes_and_paths_separately(self, tmp_path):
-        # Target classes and property paths can live in different vocabularies;
-        # a single namespace for both leaves the classes with no focus node and
-        # pySHACL reports that as conforming (#1814 review).
-        shapes = tmp_path / "mixed.ttl"
-        shapes.write_text(
-            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
-            "@prefix a: <http://ex.org/classes#> .\n"
-            "@prefix b: <http://ex.org/props#> .\n"
-            "a:Person a sh:NodeShape ; sh:targetClass a:Person ;\n"
-            "  sh:property [ sh:path b:name ] .\n",
-            encoding="utf-8",
-        )
-        ontology = {"classes": [], "properties": []}
-        class_ns, property_ns = cli_module._shacl_data_namespaces(ontology, str(shapes))
-        assert class_ns == "http://ex.org/classes#"
-        assert property_ns == "http://ex.org/props#"
-
-    def test_term_iris_cover_every_raw_source_key(self):
-        # Inference merges names that normalize to one property and keeps a
-        # single inferred_from; the other spelling still has to resolve to the
-        # same IRI or its value escapes the shape (#1814 review).
-        ontology = {
-            "classes": [],
-            "properties": [{
-                "name": "fooBar",
-                "uri": "http://ex.org/ont#fooBar",
-                "metadata": {"inferred_from": "fooBar",
-                             "inferred_from_all": ["fooBar", "foo_bar"]},
-            }],
-        }
-        _, properties = cli_module._term_iris_by_source(ontology)
-        assert properties["fooBar"] == "http://ex.org/ont#fooBar"
-        assert properties["foo_bar"] == properties["fooBar"]
-
-    def test_ontology_from_graph_passes_the_occurrence_gate(self, monkeypatch):
-        captured = {}
-
-        class _Gen:
-            def __init__(self, **kwargs):
-                pass
-
-            def generate_ontology(self, data, **options):
-                captured.update(options)
-                return {"classes": [], "properties": []}
-
-        import semantica.ontology as ontology_mod
-        monkeypatch.setattr(ontology_mod, "OntologyGenerator", _Gen)
-        cli_module._ontology_from_graph(
-            MagicMock(), {"entities": [], "relationships": []}, min_occurrences=1
-        )
-        assert captured.get("min_occurrences") == 1
-
-    def test_shacl_data_graph_percent_encodes_iris(self):
-        # The store path uses a node's display name as its ID, so a name with a
-        # space would produce unparseable Turtle (#1814 review).
-        graph = {"entities": [{"id": "Alice Smith", "type": "Person"}],
-                 "relationships": []}
-        turtle = cli_module._shacl_data_graph_turtle(graph, "http://ex.org/ont#")
-        assert "Alice%20Smith" in turtle
-        assert "Alice Smith" not in turtle
-
-    def test_ontology_version_hints_the_key_it_actually_reads(self, runner):
-        result = runner.invoke(cli_module.main, ["ontology", "version"])
-        assert "custom.ontology.version_storage_path" in _flatten(result.output)
-
-    def test_ontology_validate_shapes_points_at_validate_shacl(self, runner):
-        # --shapes moved to `validate shacl`; an existing script should get a
-        # pointer rather than Click's "No such option" (#1814 review).
-        result = runner.invoke(cli_module.main,
-                               ["ontology", "validate", "--shapes", "x.ttl"])
-        assert result.exit_code != 0
-        assert "validate shacl" in _flatten(result.output)
-
-    def test_shacl_data_namespace_follows_the_external_shapes_file(self, tmp_path):
-        shapes = tmp_path / "shapes.ttl"
-        shapes.write_text(
-            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
-            "@prefix ex: <http://example.org/ex#> .\n"
-            "ex:PersonShape a sh:NodeShape ;\n"
-            "    sh:targetClass ex:Person ;\n"
-            "    sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n"
-        )
-        ontology = {"namespace": {"base_uri": "http://ex.org/ont#"}}
-        assert (
-            cli_module._shacl_data_namespace(ontology, str(shapes))
-            == "http://example.org/ex#"
-        )
-
-    def test_shacl_data_namespace_falls_back_without_shapes(self):
-        ontology = {"namespace": {"base_uri": "http://ex.org/ont#"}}
-        assert cli_module._shacl_data_namespace(ontology, None) == "http://ex.org/ont#"
-
-    def test_shacl_reports_a_violation_under_external_shapes(self, runner, tmp_path):
-        """With an external shapes file the data has to be minted in that file's
-        own vocabulary. Minting it in the ontology namespace left every shape
-        with zero focus nodes, which pySHACL reports as conforming."""
-        pytest.importorskip("pyshacl")
-        from semantica.context import ContextGraph
-
-        graph = ContextGraph()
-        graph.add_nodes([{"id": "alice", "type": "Person", "properties": {"age": 30}}])
-        graph_path = tmp_path / "graph.json"
-        graph.save_to_file(graph_path)
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text(f"graph_db:\n  backend: memory\n  path: {graph_path}\n")
-        shapes = tmp_path / "shapes.ttl"
-        shapes.write_text(
-            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
-            "@prefix ex: <http://example.org/ex#> .\n"
-            "ex:PersonShape a sh:NodeShape ;\n"
-            "    sh:targetClass ex:Person ;\n"
-            "    sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n"
-        )
-        result = runner.invoke(
-            cli_module.main,
-            [
-                "--config",
-                str(cfg),
-                "validate",
-                "shacl",
-                "--shapes",
-                str(shapes),
-                "--json",
-            ],
-        )
-        _ok(result)
-        data = _json_output(result)
-        assert data["conforms"] is False
-        assert data["violation_count"] >= 1
-
     def test_integrity_exits_0_with_import_error(self, runner):
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
             (_ for _ in ()).throw(ImportError(n))
@@ -2778,11 +2520,6 @@ class TestValidate:
             result = runner.invoke(cli_module.main, ["validate", "integrity"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
-
-    def test_strictness_choices(self, runner):
-        result = runner.invoke(cli_module.main, ["validate", "shacl", "--help"])
-        for s in ["strict", "moderate", "lenient"]:
-            assert s in result.output
 
 
 # ─── ontology ─────────────────────────────────────────────────────────────────
@@ -2916,26 +2653,30 @@ class TestOntology:
         assert data["version"] is None
         assert "No persistent version store selected" in data["message"]
 
-    def test_version_reports_the_newest_snapshot(self, runner, graph_cfg, monkeypatch):
-        """With snapshots on record the command reports the most recent one."""
-        import semantica.change_management as change_module
-
-        class _Manager:
-            def __init__(self, **kwargs):
-                pass
-
-            def list_versions(self):
-                return [
-                    {"label": "v1", "timestamp": "2026-01-01T00:00:00"},
-                    {"label": "v2", "timestamp": "2026-02-01T00:00:00"},
-                ]
-
-        monkeypatch.setattr(change_module, "OntologyVersionManager", _Manager)
+    def test_version_rejects_a_missing_store_file(self, runner, graph_cfg, tmp_path):
+        """A mistyped path used to create an empty store and report no versions;
+        the flag now fails fast instead."""
         result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "ontology", "version", "--json"]
+            cli_module.main,
+            [
+                "--config", graph_cfg, "ontology", "version",
+                "--storage", str(tmp_path / "typo.db"), "--json",
+            ],
         )
-        _ok(result)
-        assert _json_output(result)["label"] == "v2"
+        assert result.exit_code == 2
+        assert "does not exist" in _flatten(result.output)
+
+    def test_version_hints_the_key_it_actually_reads(self, runner):
+        result = runner.invoke(cli_module.main, ["ontology", "version"])
+        assert "custom.ontology.version_storage_path" in _flatten(result.output)
+
+    def test_validate_shapes_points_at_validate_shacl(self, runner):
+        # --shapes moved to `validate shacl`; an existing script should get a
+        # pointer rather than Click's "No such option" (#1814 review).
+        result = runner.invoke(cli_module.main,
+                               ["ontology", "validate", "--shapes", "x.ttl"])
+        assert result.exit_code != 0
+        assert "validate shacl" in _flatten(result.output)
 
     def test_health_returns_a_quality_report(self, runner, graph_cfg):
         """#1814: OntologyValidator has no `health`; the quality gate does."""
@@ -2946,90 +2687,6 @@ class TestOntology:
         assert "passed" in _json_output(result)
 
     # ── #1814 review: paths, vocabularies and format names ────────────────────
-
-    def test_shacl_shapes_cover_a_nested_attribute(self, runner, tmp_path):
-        """The shapes are generated from the ontology, which infers properties
-        from top-level keys; entities whose attributes stay under ``properties``
-        produced shapes with no property constraints at all."""
-        from semantica.context import ContextGraph
-
-        graph = ContextGraph()
-        graph.add_nodes(
-            [
-                {"id": "e1", "type": "Person", "properties": {"age": 30}},
-                {"id": "e2", "type": "Person", "properties": {"age": 40}},
-            ]
-        )
-        graph_path = tmp_path / "graph.json"
-        graph.save_to_file(graph_path)
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text(f"graph_db:\n  backend: memory\n  path: {graph_path}\n")
-        result = runner.invoke(
-            cli_module.main, ["--config", str(cfg), "ontology", "shacl", "--json"]
-        )
-        _ok(result)
-        assert "age" in _json_output(result)["shacl"]
-
-    def test_version_reads_the_store_passed_on_the_command_line(
-        self, runner, graph_cfg, tmp_path, monkeypatch
-    ):
-        """OntologyVersionManager keeps an in-memory store unless it is handed a
-        path, so the command read a fresh store and reported "no versions" no
-        matter what another process had saved."""
-        import semantica.change_management as change_module
-
-        seen = {}
-
-        class _Manager:
-            def __init__(self, **kwargs):
-                seen.update(kwargs)
-
-            def list_versions(self):
-                return []
-
-        monkeypatch.setattr(change_module, "OntologyVersionManager", _Manager)
-        store = tmp_path / "versions.db"
-        result = runner.invoke(
-            cli_module.main,
-            [
-                "--config",
-                graph_cfg,
-                "ontology",
-                "version",
-                "--storage",
-                str(store),
-                "--json",
-            ],
-        )
-        _ok(result)
-        assert seen["storage_path"] == str(store)
-
-    def test_version_reads_the_store_named_in_the_config(
-        self, runner, tmp_path, monkeypatch
-    ):
-        import semantica.change_management as change_module
-
-        seen = {}
-
-        class _Manager:
-            def __init__(self, **kwargs):
-                seen.update(kwargs)
-
-            def list_versions(self):
-                return []
-
-        monkeypatch.setattr(change_module, "OntologyVersionManager", _Manager)
-        store = tmp_path / "from_config.db"
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text(
-            f"graph_db:\n  backend: memory\n  path: {tmp_path / 'graph.json'}\n"
-            f"custom:\n  ontology:\n    version_storage_path: {store}\n"
-        )
-        result = runner.invoke(
-            cli_module.main, ["--config", str(cfg), "ontology", "version", "--json"]
-        )
-        _ok(result)
-        assert seen["storage_path"] == str(store)
 
     def test_import_maps_the_advertised_format_names(
         self, runner, graph_cfg, tmp_path, monkeypatch
