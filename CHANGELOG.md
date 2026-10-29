@@ -113,6 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Undirected traversal (`directed=false`) can walk a stored edge backwards; `total_weight` costed those hops against the directed view and fell back to the default `1.0`, and `resolve_path_edge_ids` scanned only outgoing adjacency so the hop contributed no id. Both now resolve reverse hops, and the reported edge is the lowest-weight parallel edge — the one the path is costed against
   - `POST /api/graph/distance-matrix` rebuilt the whole graph once per node pair; it is now built once per request
 
+- **`semantica provenance` commands ignored the persisted provenance DB** (fixes #1810) by @pkupt
+  - Every subcommand built `ProvenanceManager(config=...)` with no storage path, so `audit`, `verify-chain`, `check`, `lineage`, `descendants` and `export` read a fresh in-memory store and reported nothing, and `invalidate` failed with "no provenance entry found". `SEMANTICA_PROVENANCE_DB` was read only by the Explorer.
+  - The CLI now resolves its store as: configured `provenance.storage_path`, then `SEMANTICA_PROVENANCE_DB`, then `EXPLORER_PROVENANCE_DB`, then in-memory. The env lookup lives in one place, `semantica.provenance.storage_path_from_env()`, which the Explorer also uses, so the two agree on one database.
+  - `ProvenanceManager()` itself still ignores the env vars, so library callers and the module-level trackers keep their explicit or in-memory storage.
+
 ### Security
 
 - **Bumped the three packages behind the failing audit gate: `authlib` 1.8.0 → 1.9.1, `litellm` 1.100.1 → 1.100.4, `msgpack` 1.2.2 → 1.2.3**
