@@ -1,5 +1,6 @@
 """SQLite provenance schema migration: concurrent open and older writers (#2157)."""
 
+import re
 import sqlite3
 import threading
 import time
@@ -170,3 +171,44 @@ class TestOlderWriterOnMigratedTable:
         # REPLACE deletes the row and inserts it again, which would blank a
         # column this release does not know about.
         assert _column_value(db_path, "future_column") == "kept"
+
+
+class TestUpsertColumnAlignment:
+    """The INSERT column list and the ON CONFLICT ... DO UPDATE SET list are
+    written out by hand next to a table defined somewhere else. A column
+    dropped from the SET half still stores fine and still reads back — with
+    the old value, silently. Nothing else in the suite notices, so check the
+    three lists against the table here."""
+
+    def test_the_upsert_lists_match_the_table(self, tmp_path, monkeypatch):
+        statements = []
+        real_connect = sqlite3.connect
+
+        def connect(*args, **kwargs):
+            conn = real_connect(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(sqlite3, "connect", connect)
+        db_path = tmp_path / "prov.db"
+        storage = SQLiteStorage(str(db_path))
+        storage.store(_entry())
+
+        upsert = "INSERT INTO provenance"
+        upserts = [s for s in statements if s.lstrip().startswith(upsert)]
+        assert len(upserts) == 1, f"expected one upsert, got {len(upserts)}"
+        sql = " ".join(upserts[0].split())
+
+        insert_columns = sql[sql.index("(") + 1 : sql.index(") VALUES")]
+        insert_columns = [column.strip() for column in insert_columns.split(",")]
+        separator = ") VALUES ("
+        values = sql[sql.index(separator) + len(separator) : sql.index(") ON CONFLICT")]
+        set_columns = re.findall(r"(\w+) = excluded\.\w+", sql)
+
+        table_columns = _columns(db_path)
+        placeholders = len(values.split(","))
+        assert placeholders == len(insert_columns), "one placeholder per column"
+        assert set(insert_columns) == table_columns, "INSERT names every table column"
+        assert len(insert_columns) == len(table_columns), "INSERT names a column twice"
+        expected_set = [c for c in insert_columns if c != "entity_id"]
+        assert set_columns == expected_set, "SET must update every column but entity_id"
