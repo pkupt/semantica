@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`joserfc` was pinned at 1.7.5, which the audit job now flags** by @Sameer6305
+  - `CVE-2026-119284` (`GHSA-9pg5-8c7x-5hfx`): the compact JWS size guard allocated attacker-controlled segments before rejecting them. It is the only finding in `requirements-ci.txt`, so `security-scan` failed every pull request opened after the advisory landed
+  - `requirements-ci.txt` and `uv.lock` now carry `joserfc==1.7.7`; 1.7.6 is the first fixed release. Nothing else moves: both files were re-resolved with only `joserfc` upgraded
+
 - **Parquet and Arrow relationship export lost graph-backend endpoint names** (refs #2018) by @george07-t
   - `ParquetExporter.export_relationships()` and `ArrowExporter.export_relationships()` read only `source`/`source_id` and `target`/`target_id`, so a record shaped by a graph backend (`start_node_id`/`end_node_id` from Neo4j, FalkorDB and Neptune, `start_id`/`end_id` from raw AGE edges) made Parquet raise `ValidationError` and wrote Arrow rows with empty `source_id` and `target_id`. Both now run the records through `canonical_endpoints` first, so the shared list, order and empty-value rule apply; Parquet keeps its `from_id`/`from`/`to_id`/`to` fallbacks, and an integer id of `0` is now kept as a real id in both, as the shared helper treats it (it used to be dropped by their `or` chains)
   - New tests in `tests/export/test_columnar_exporters_endpoint_names.py` read the written files back for every accepted spelling, an empty canonical value, precedence, an id of `0`, untouched input and mixed batches
