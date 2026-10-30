@@ -20,6 +20,8 @@ import sys
 import time
 import re
 import stat
+import sys
+import tarfile
 import types
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -2441,7 +2443,10 @@ class TestTemporal:
         assert result.exit_code != 0 or result.exit_code == 0  # depends on import
 
     def test_history_import_error_is_clean(self, runner, monkeypatch):
+        # Earlier tests may already have imported the submodule, and a cached
+        # submodule resolves without consulting its parent package.
         monkeypatch.setitem(sys.modules, "semantica.kg", None)
+        monkeypatch.setitem(sys.modules, "semantica.kg.temporal_reasoning", None)
         result = runner.invoke(cli_module.main, ["temporal", "history",
                                       "entity_alice"])
         assert result.exit_code != 0
@@ -2501,6 +2506,30 @@ class TestProvenance:
 # ─── validate ─────────────────────────────────────────────────────────────────
 
 
+_SHAPES_TURTLE = (
+    "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
+    "@prefix ex: <http://example.org/> .\n"
+    "ex:PersonShape a sh:NodeShape ;\n"
+    "    sh:targetClass ex:Person ;\n"
+    "    sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n"
+)
+
+_DATA_WITH_NAME_TURTLE = (
+    "@prefix ex: <http://example.org/> .\n"
+    'ex:alice a ex:Person ; ex:name "Alice" .\n'
+)
+
+_DATA_WITHOUT_NAME_TURTLE = (
+    "@prefix ex: <http://example.org/> .\n"
+    "ex:alice a ex:Person .\n"
+)
+
+
+def _rdf_file(path, text):
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
 class TestValidate:
     def test_group_help(self, runner):
         result = runner.invoke(cli_module.main, ["validate", "--help"])
@@ -2508,21 +2537,67 @@ class TestValidate:
         for sub in ["shacl", "conflicts", "integrity"]:
             assert sub in result.output
 
-    def test_shacl_help(self, runner):
+    def test_shacl_help_names_the_data_and_shapes_arguments(self, runner):
         result = runner.invoke(cli_module.main, ["validate", "shacl", "--help"])
         _ok(result)
-        assert "--strictness" in result.output
+        assert "DATA" in result.output
+        assert "--shapes" in result.output
 
-    def test_shacl_import_error_is_clean(self, runner):
+    def test_shacl_conforms_on_matching_data(self, runner, tmp_path):
+        """#1814: the command had no way to check an RDF file against shapes."""
+        pytest.importorskip("pyshacl")
+        data = _rdf_file(tmp_path / "data.ttl", _DATA_WITH_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
+        result = runner.invoke(
+            cli_module.main,
+            ["validate", "shacl", data, "--shapes", shapes, "--json"],
+        )
+        _ok(result)
+        payload = _json_output(result)
+        assert payload["conforms"] is True
+        assert payload["violations"] == []
+
+    def test_shacl_reports_a_violation(self, runner, tmp_path):
+        pytest.importorskip("pyshacl")
+        data = _rdf_file(tmp_path / "data.ttl", _DATA_WITHOUT_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
+        result = runner.invoke(
+            cli_module.main,
+            ["validate", "shacl", data, "--shapes", shapes, "--json"],
+        )
+        # Non-conforming data exits 1 so CI can gate on it.
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.output.strip())
+        assert payload["conforms"] is False
+        assert payload["violation_count"] >= 1
+
+    def test_shacl_rejects_an_extension_it_cannot_read(self, runner, tmp_path):
+        data = _rdf_file(tmp_path / "data.rdf", _DATA_WITH_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
+        result = runner.invoke(
+            cli_module.main,
+            ["validate", "shacl", data, "--shapes", shapes, "--json"],
+        )
+        assert result.exit_code == 2
+        assert "cannot tell the RDF format" in _flatten(result.output)
+
+    def test_shacl_import_error_is_clean(self, runner, tmp_path):
+        data = _rdf_file(tmp_path / "data.ttl", _DATA_WITH_NAME_TURTLE)
+        shapes = _rdf_file(tmp_path / "shapes.ttl", _SHAPES_TURTLE)
         with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
             (_ for _ in ()).throw(ImportError(n))
             if "ontology" in n else _real_import(n, *a, **k)
         )):
-            result = runner.invoke(cli_module.main, ["validate", "shacl"])
+            result = runner.invoke(
+                cli_module.main,
+                ["validate", "shacl", data, "--shapes", shapes],
+            )
         assert result.exit_code != 0
         assert "Traceback" not in result.output
 
-    def test_conflicts_json(self, runner, graph_cfg, monkeypatch):
+    def test_conflicts_calls_the_detector_with_all_strategies(
+        self, runner, graph_cfg, monkeypatch
+    ):
         """#1814: the CLI must call ConflictDetector, whose `all` method is the
         command's default strategy. The module-level convenience function has no
         `all` and no `property`, and it takes no config."""
@@ -2539,62 +2614,47 @@ class TestValidate:
                 seen["kwargs"] = kwargs
                 return []
 
-            def detect_relationship_conflicts(self, relationships):
-                seen["relationships"] = relationships
-                return []
-
         monkeypatch.setattr(conflicts_module, "ConflictDetector", _Detector)
         result = runner.invoke(
             cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
         )
         _ok(result)
-        data = _json_output(result)
-        assert data == {"conflicts": [], "count": 0}
+        assert _json_output(result) == {"conflicts": [], "count": 0}
         assert seen["kwargs"]["method"] == "all"
         assert seen["kwargs"]["relationships"] == []
-        assert seen["relationships"] == []
-
-    def test_conflicts_runs_against_the_configured_graph(self, runner, graph_cfg):
-        """#1814: detect_conflicts() was called without its `entities` argument."""
-        result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
-        )
-        _ok(result)
-        data = _json_output(result)
-        assert data["count"] == 0
-        assert data["conflicts"] == []
 
     def test_conflicts_property_strategy_is_reachable(self, runner, graph_cfg):
         """The advertised value/property strategies need a property name."""
         result = runner.invoke(
             cli_module.main,
             [
-                "--config",
-                graph_cfg,
-                "validate",
-                "conflicts",
-                "--strategy",
-                "value",
-                "--property",
-                "name",
-                "--json",
+                "--config", graph_cfg, "validate", "conflicts",
+                "--strategy", "value", "--property", "name", "--json",
             ],
         )
         _ok(result)
         assert _json_output(result)["count"] == 0
 
-    def test_shacl_validation_runs_end_to_end(self, runner, graph_cfg):
-        """#1814: no SHACL validation was wired into the CLI at all."""
-        pytest.importorskip("pyshacl")
+    def test_conflicts_value_strategy_without_property_is_a_usage_error(
+        self, runner, graph_cfg
+    ):
         result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "validate", "shacl", "--json"]
+            cli_module.main,
+            ["--config", graph_cfg, "validate", "conflicts", "--strategy", "value"],
         )
-        _ok(result)
-        data = _json_output(result)
-        assert data["conforms"] is True
-        assert data["violations"] == []
+        assert result.exit_code == 2
+        assert "--property" in _flatten(result.output)
 
-    # ── #1814 review: the adapters handed the detectors the wrong shape ───────
+    def test_conflicts_all_strategy_rejects_a_property(self, runner, graph_cfg):
+        result = runner.invoke(
+            cli_module.main,
+            [
+                "--config", graph_cfg, "validate", "conflicts",
+                "--strategy", "all", "--property", "name",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "--property" in _flatten(result.output)
 
     def test_conflict_entities_lift_the_nested_attributes(self):
         """ConflictDetector's value strategy tests ``property_name in entity``,
@@ -2606,7 +2666,6 @@ class TestValidate:
             "relationships": [],
         }
         entity = cli_module._conflict_entities(graph)[0]
-        assert "age" in entity
         assert entity["age"] == 30
         # A structural field keeps its own meaning on a name clash.
         assert entity["type"] == "Person"
@@ -2625,328 +2684,12 @@ class TestValidate:
         assert entity["age"] == 30
         assert entity["id"] == "e1"
 
-    def test_conflicts_all_also_runs_the_relationship_strategy(
-        self, runner, graph_cfg, monkeypatch
-    ):
-        """detect_conflicts(method="all") never dispatches the relationship
-        strategy, so the relationships the command reads went unexamined on the
-        default run."""
-        import semantica.conflicts as conflicts_module
-
-        calls = {"entities": 0, "relationships": 0}
-
-        class _Detector:
-            def __init__(self, **kwargs):
-                pass
-
-            def detect_conflicts(self, entities, **kwargs):
-                calls["entities"] += 1
-                return []
-
-            def detect_relationship_conflicts(self, relationships):
-                calls["relationships"] += 1
-                return []
-
-        monkeypatch.setattr(conflicts_module, "ConflictDetector", _Detector)
-        result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "validate", "conflicts", "--json"]
-        )
-        _ok(result)
-        assert calls == {"entities": 1, "relationships": 1}
-
-    def test_conflicts_leaves_relationships_to_their_own_strategy(
-        self, runner, graph_cfg, monkeypatch
-    ):
-        """An explicit strategy must dispatch to that strategy alone, or the
-        run reports conflicts the caller did not ask for."""
-        import semantica.conflicts as conflicts_module
-
-        calls = {"relationships": 0}
-
-        class _Detector:
-            def __init__(self, **kwargs):
-                pass
-
-            def detect_conflicts(self, entities, **kwargs):
-                return []
-
-            def detect_relationship_conflicts(self, relationships):
-                calls["relationships"] += 1
-                return []
-
-        monkeypatch.setattr(conflicts_module, "ConflictDetector", _Detector)
-        result = runner.invoke(
-            cli_module.main,
-            [
-                "--config",
-                graph_cfg,
-                "validate",
-                "conflicts",
-                "--strategy",
-                "value",
-                "--property",
-                "name",
-                "--json",
-            ],
-        )
-        _ok(result)
-        assert calls["relationships"] == 0
-
-    def test_conflicts_relationships_carry_an_id_and_both_endpoints(
-        self, runner, monkeypatch, tmp_path
-    ):
-        """ConflictDetector groups relationships by ``id``, falling back to
-        ``{source_id}_{target_id}_{type}``. Store rows carry neither field, so
-        every edge of one type collapsed into a single group and unrelated edges
-        with different properties were reported as a conflict."""
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("graph_db:\n  backend: neo4j\n")
-
-        class _Store:
-            def get_nodes(self, limit=None):
-                return [
-                    {"id": 1, "labels": ["Person"], "properties": {"name": "Alice"}},
-                    {"id": 2, "labels": ["Person"], "properties": {"name": "Bob"}},
-                ]
-
-            def get_relationships(self, limit=None):
-                return [{"type": "KNOWS", "start_node_id": 1, "end_node_id": 2}]
-
-        captured = {}
-        real = cli_module._graph_store_as_context
-
-        def _spy(ctx):
-            captured["graph"] = real(ctx)
-            return captured["graph"]
-
-        monkeypatch.setattr(cli_module, "_get_graph_store", lambda ctx: _Store())
-        monkeypatch.setattr(cli_module, "_graph_store_as_context", _spy)
-        result = runner.invoke(
-            cli_module.main, ["--config", str(cfg), "validate", "conflicts", "--json"]
-        )
-        _ok(result)
-        rel = captured["graph"]["relationships"][0]
-        assert rel["id"] == "Alice_Bob_KNOWS"
-        assert rel["source_id"] == "Alice"
-        assert rel["target_id"] == "Bob"
-
-    def test_shacl_data_graph_uses_the_inferred_class_iri(self):
-        """Class inference renames its inputs (``people`` becomes ``Person``) and
-        the shapes are built from those normalized names, so serializing an
-        entity's raw type put its data in a class no shape targets and pySHACL
-        reported conformance without checking anything."""
-        ontology = {
-            "namespace": {"base_uri": "http://ex.org/ont#"},
-            "classes": [
-                {
-                    "uri": "http://ex.org/ont#Person",
-                    "metadata": {"inferred_from": "people"},
-                }
-            ],
-            "properties": [
-                {"uri": "http://ex.org/ont#age", "metadata": {"inferred_from": "age"}}
-            ],
-        }
-        classes, properties = cli_module._term_iris_by_source(ontology)
-        assert classes == {"people": "http://ex.org/ont#Person"}
-        assert properties == {"age": "http://ex.org/ont#age"}
-
-        turtle = cli_module._shacl_data_graph_turtle(
-            {
-                "entities": [{"id": "e1", "type": "people", "properties": {"age": 3}}],
-                "relationships": [],
-            },
-            cli_module._ontology_namespace(ontology),
-            classes,
-            properties,
-        )
-        import rdflib
-
-        data = rdflib.Graph()
-        data.parse(data=turtle, format="turtle")
-        subject = rdflib.URIRef("http://ex.org/ont#e1")
-        assert (subject, rdflib.RDF.type, rdflib.URIRef("http://ex.org/ont#Person")) in data
-        # The raw type must not reach the graph as a class of its own.
-        assert list(data.objects(subject, rdflib.RDF.type)) == [
-            rdflib.URIRef("http://ex.org/ont#Person")
-        ]
-        age = list(data.triples((subject, rdflib.URIRef("http://ex.org/ont#age"), None)))
-        assert [str(value) for _, _, value in age] == ["3"]
-
-    def test_term_iris_rebase_onto_the_shapes_namespace(self):
-        ontology = {
-            "namespace": {"base_uri": "http://ex.org/ont#"},
-            "classes": [
-                {
-                    "uri": "http://ex.org/ont#Person",
-                    "metadata": {"inferred_from": "people"},
-                }
-            ],
-            "properties": [],
-        }
-        classes, _ = cli_module._term_iris_by_source(
-            ontology, "http://shapes.example/v#"
-        )
-        assert classes == {"people": "http://shapes.example/v#Person"}
-
-    def test_shacl_data_graph_maps_relationship_types_to_shape_iris(self):
-        # Generated shapes constrain the property IRI, so a relationship whose
-        # raw type inference renamed has to be mapped like an entity attribute
-        # (#1814 review).
-        graph = {
-            "entities": [{"id": "n1", "type": "Person"},
-                         {"id": "n2", "type": "Person"}],
-            "relationships": [{"source": "n1", "target": "n2", "type": "works_with"}],
-        }
-        turtle = cli_module._shacl_data_graph_turtle(
-            graph, "http://ex.org/ont#", {},
-            {"works_with": "http://ex.org/ont#worksWith"},
-        )
-        assert "worksWith" in turtle
-        assert "works_with" not in turtle
-
-    def test_shacl_data_namespaces_resolve_classes_and_paths_separately(self, tmp_path):
-        # Target classes and property paths can live in different vocabularies;
-        # a single namespace for both leaves the classes with no focus node and
-        # pySHACL reports that as conforming (#1814 review).
-        shapes = tmp_path / "mixed.ttl"
-        shapes.write_text(
-            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
-            "@prefix a: <http://ex.org/classes#> .\n"
-            "@prefix b: <http://ex.org/props#> .\n"
-            "a:Person a sh:NodeShape ; sh:targetClass a:Person ;\n"
-            "  sh:property [ sh:path b:name ] .\n",
-            encoding="utf-8",
-        )
-        ontology = {"classes": [], "properties": []}
-        class_ns, property_ns = cli_module._shacl_data_namespaces(ontology, str(shapes))
-        assert class_ns == "http://ex.org/classes#"
-        assert property_ns == "http://ex.org/props#"
-
-    def test_term_iris_cover_every_raw_source_key(self):
-        # Inference merges names that normalize to one property and keeps a
-        # single inferred_from; the other spelling still has to resolve to the
-        # same IRI or its value escapes the shape (#1814 review).
-        ontology = {
-            "classes": [],
-            "properties": [{
-                "name": "fooBar",
-                "uri": "http://ex.org/ont#fooBar",
-                "metadata": {"inferred_from": "fooBar",
-                             "inferred_from_all": ["fooBar", "foo_bar"]},
-            }],
-        }
-        _, properties = cli_module._term_iris_by_source(ontology)
-        assert properties["fooBar"] == "http://ex.org/ont#fooBar"
-        assert properties["foo_bar"] == properties["fooBar"]
-
-    def test_ontology_from_graph_passes_the_occurrence_gate(self, monkeypatch):
-        captured = {}
-
-        class _Gen:
-            def __init__(self, **kwargs):
-                pass
-
-            def generate_ontology(self, data, **options):
-                captured.update(options)
-                return {"classes": [], "properties": []}
-
-        import semantica.ontology as ontology_mod
-        monkeypatch.setattr(ontology_mod, "OntologyGenerator", _Gen)
-        cli_module._ontology_from_graph(
-            MagicMock(), {"entities": [], "relationships": []}, min_occurrences=1
-        )
-        assert captured.get("min_occurrences") == 1
-
-    def test_shacl_data_graph_percent_encodes_iris(self):
-        # The store path uses a node's display name as its ID, so a name with a
-        # space would produce unparseable Turtle (#1814 review).
-        graph = {"entities": [{"id": "Alice Smith", "type": "Person"}],
-                 "relationships": []}
-        turtle = cli_module._shacl_data_graph_turtle(graph, "http://ex.org/ont#")
-        assert "Alice%20Smith" in turtle
-        assert "Alice Smith" not in turtle
-
-    def test_ontology_version_hints_the_key_it_actually_reads(self, runner):
-        result = runner.invoke(cli_module.main, ["ontology", "version"])
-        assert "custom.ontology.version_storage_path" in _flatten(result.output)
-
-    def test_ontology_validate_shapes_points_at_validate_shacl(self, runner):
-        # --shapes moved to `validate shacl`; an existing script should get a
-        # pointer rather than Click's "No such option" (#1814 review).
-        result = runner.invoke(cli_module.main,
-                               ["ontology", "validate", "--shapes", "x.ttl"])
-        assert result.exit_code != 0
-        assert "validate shacl" in _flatten(result.output)
-
-    def test_shacl_data_namespace_follows_the_external_shapes_file(self, tmp_path):
-        shapes = tmp_path / "shapes.ttl"
-        shapes.write_text(
-            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
-            "@prefix ex: <http://example.org/ex#> .\n"
-            "ex:PersonShape a sh:NodeShape ;\n"
-            "    sh:targetClass ex:Person ;\n"
-            "    sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n"
-        )
-        ontology = {"namespace": {"base_uri": "http://ex.org/ont#"}}
-        assert (
-            cli_module._shacl_data_namespace(ontology, str(shapes))
-            == "http://example.org/ex#"
-        )
-
-    def test_shacl_data_namespace_falls_back_without_shapes(self):
-        ontology = {"namespace": {"base_uri": "http://ex.org/ont#"}}
-        assert cli_module._shacl_data_namespace(ontology, None) == "http://ex.org/ont#"
-
-    def test_shacl_reports_a_violation_under_external_shapes(self, runner, tmp_path):
-        """With an external shapes file the data has to be minted in that file's
-        own vocabulary. Minting it in the ontology namespace left every shape
-        with zero focus nodes, which pySHACL reports as conforming."""
-        pytest.importorskip("pyshacl")
-        from semantica.context import ContextGraph
-
-        graph = ContextGraph()
-        graph.add_nodes([{"id": "alice", "type": "Person", "properties": {"age": 30}}])
-        graph_path = tmp_path / "graph.json"
-        graph.save_to_file(graph_path)
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text(f"graph_db:\n  backend: memory\n  path: {graph_path}\n")
-        shapes = tmp_path / "shapes.ttl"
-        shapes.write_text(
-            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n"
-            "@prefix ex: <http://example.org/ex#> .\n"
-            "ex:PersonShape a sh:NodeShape ;\n"
-            "    sh:targetClass ex:Person ;\n"
-            "    sh:property [ sh:path ex:name ; sh:minCount 1 ] .\n"
-        )
-        result = runner.invoke(
-            cli_module.main,
-            [
-                "--config",
-                str(cfg),
-                "validate",
-                "shacl",
-                "--shapes",
-                str(shapes),
-                "--json",
-            ],
-        )
-        _ok(result)
-        data = _json_output(result)
-        assert data["conforms"] is False
-        assert data["violation_count"] >= 1
-
     def test_integrity_exits_0_with_import_error(self, runner, monkeypatch):
         monkeypatch.setitem(sys.modules, "semantica.kg", None)
         result = runner.invoke(cli_module.main, ["validate", "integrity"])
         assert result.exit_code != 0
         assert "Traceback" not in result.output
         assert "semantica.kg" in result.output
-
-    def test_strictness_choices(self, runner):
-        result = runner.invoke(cli_module.main, ["validate", "shacl", "--help"])
-        for s in ["strict", "moderate", "lenient"]:
-            assert s in result.output
 
 
 # ─── ontology ─────────────────────────────────────────────────────────────────
@@ -3080,26 +2823,44 @@ class TestOntology:
         assert data["version"] is None
         assert "No persistent version store selected" in data["message"]
 
-    def test_version_reports_the_newest_snapshot(self, runner, graph_cfg, monkeypatch):
-        """With snapshots on record the command reports the most recent one."""
-        import semantica.change_management as change_module
-
-        class _Manager:
-            def __init__(self, **kwargs):
-                pass
-
-            def list_versions(self):
-                return [
-                    {"label": "v1", "timestamp": "2026-01-01T00:00:00"},
-                    {"label": "v2", "timestamp": "2026-02-01T00:00:00"},
-                ]
-
-        monkeypatch.setattr(change_module, "OntologyVersionManager", _Manager)
+    def test_version_rejects_a_missing_store_file(self, runner, graph_cfg, tmp_path):
+        """A mistyped path used to create an empty store and report no versions;
+        the flag now fails fast instead."""
         result = runner.invoke(
-            cli_module.main, ["--config", graph_cfg, "ontology", "version", "--json"]
+            cli_module.main,
+            [
+                "--config", graph_cfg, "ontology", "version",
+                "--storage", str(tmp_path / "typo.db"), "--json",
+            ],
         )
-        _ok(result)
-        assert _json_output(result)["label"] == "v2"
+        assert result.exit_code == 2
+        assert "does not exist" in _flatten(result.output)
+
+    def test_version_rejects_a_missing_configured_store(self, runner, tmp_path):
+        """The config key must not create an empty store either."""
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(
+            "custom:\n  ontology:\n"
+            f"    version_storage_path: {tmp_path / 'typo.db'}\n"
+        )
+        result = runner.invoke(
+            cli_module.main, ["--config", str(cfg), "ontology", "version", "--json"]
+        )
+        assert result.exit_code == 1
+        assert "does not exist" in _flatten(result.output)
+        assert not (tmp_path / "typo.db").exists()
+
+    def test_version_hints_the_key_it_actually_reads(self, runner):
+        result = runner.invoke(cli_module.main, ["ontology", "version"])
+        assert "custom.ontology.version_storage_path" in _flatten(result.output)
+
+    def test_validate_shapes_points_at_validate_shacl(self, runner):
+        # --shapes moved to `validate shacl`; an existing script should get a
+        # pointer rather than Click's "No such option" (#1814 review).
+        result = runner.invoke(cli_module.main,
+                               ["ontology", "validate", "--shapes", "x.ttl"])
+        assert result.exit_code != 0
+        assert "validate shacl" in _flatten(result.output)
 
     def test_health_returns_a_quality_report(self, runner, graph_cfg):
         """#1814: OntologyValidator has no `health`; the quality gate does."""
@@ -3110,90 +2871,6 @@ class TestOntology:
         assert "passed" in _json_output(result)
 
     # ── #1814 review: paths, vocabularies and format names ────────────────────
-
-    def test_shacl_shapes_cover_a_nested_attribute(self, runner, tmp_path):
-        """The shapes are generated from the ontology, which infers properties
-        from top-level keys; entities whose attributes stay under ``properties``
-        produced shapes with no property constraints at all."""
-        from semantica.context import ContextGraph
-
-        graph = ContextGraph()
-        graph.add_nodes(
-            [
-                {"id": "e1", "type": "Person", "properties": {"age": 30}},
-                {"id": "e2", "type": "Person", "properties": {"age": 40}},
-            ]
-        )
-        graph_path = tmp_path / "graph.json"
-        graph.save_to_file(graph_path)
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text(f"graph_db:\n  backend: memory\n  path: {graph_path}\n")
-        result = runner.invoke(
-            cli_module.main, ["--config", str(cfg), "ontology", "shacl", "--json"]
-        )
-        _ok(result)
-        assert "age" in _json_output(result)["shacl"]
-
-    def test_version_reads_the_store_passed_on_the_command_line(
-        self, runner, graph_cfg, tmp_path, monkeypatch
-    ):
-        """OntologyVersionManager keeps an in-memory store unless it is handed a
-        path, so the command read a fresh store and reported "no versions" no
-        matter what another process had saved."""
-        import semantica.change_management as change_module
-
-        seen = {}
-
-        class _Manager:
-            def __init__(self, **kwargs):
-                seen.update(kwargs)
-
-            def list_versions(self):
-                return []
-
-        monkeypatch.setattr(change_module, "OntologyVersionManager", _Manager)
-        store = tmp_path / "versions.db"
-        result = runner.invoke(
-            cli_module.main,
-            [
-                "--config",
-                graph_cfg,
-                "ontology",
-                "version",
-                "--storage",
-                str(store),
-                "--json",
-            ],
-        )
-        _ok(result)
-        assert seen["storage_path"] == str(store)
-
-    def test_version_reads_the_store_named_in_the_config(
-        self, runner, tmp_path, monkeypatch
-    ):
-        import semantica.change_management as change_module
-
-        seen = {}
-
-        class _Manager:
-            def __init__(self, **kwargs):
-                seen.update(kwargs)
-
-            def list_versions(self):
-                return []
-
-        monkeypatch.setattr(change_module, "OntologyVersionManager", _Manager)
-        store = tmp_path / "from_config.db"
-        cfg = tmp_path / "cfg.yaml"
-        cfg.write_text(
-            f"graph_db:\n  backend: memory\n  path: {tmp_path / 'graph.json'}\n"
-            f"custom:\n  ontology:\n    version_storage_path: {store}\n"
-        )
-        result = runner.invoke(
-            cli_module.main, ["--config", str(cfg), "ontology", "version", "--json"]
-        )
-        _ok(result)
-        assert seen["storage_path"] == str(store)
 
     def test_import_maps_the_advertised_format_names(
         self, runner, graph_cfg, tmp_path, monkeypatch
@@ -3507,21 +3184,47 @@ class TestPipeline:
         result = runner.invoke(cli_module.main, ["pipeline", "init", "--dry-run"])
         _ok(result)
 
-    def test_init_creates_file(self, runner, monkeypatch):
-        fake_pl = _fake_module(
-            PipelineTemplateManager=lambda: MagicMock(scaffold=lambda t: "steps: []\n"),
-        )
-        monkeypatch.setitem(__import__("sys").modules, "semantica.pipeline", fake_pl)
-        with runner.isolated_filesystem():
-            result = runner.invoke(cli_module.main, ["pipeline", "init",
-                                          "--template", "rag", "--output", "pl.yaml"])
-            _ok(result)
-            assert os.path.exists("pl.yaml")
+    def test_init_templates_match_the_manager(self, runner):
+        # The CLI hardcoded five template names the manager has never registered,
+        # so every `pipeline init` would have reached "Template not found" once the
+        # wrapper called the real API. Keep the two lists in step.
+        from semantica.pipeline import PipelineTemplateManager
 
-    def test_init_template_choices(self, runner):
+        manager = PipelineTemplateManager()
+        assert cli_module._PIPELINE_TEMPLATES == manager.list_templates()
+
+    def test_init_creates_a_loadable_pipeline(self, runner):
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "init", "--template", "rag_pipeline",
+                 "--output", "pl.yaml"],
+            )
+            _ok(result)
+            pipeline = cli_module._load_pipeline_file("pl.yaml")
+        assert [s.name for s in pipeline.steps] == [
+            "ingest", "chunk", "embed", "store_vectors",
+        ]
+
+    def test_init_writes_the_pipeline_not_a_placeholder(self, runner):
+        # The old ImportError path silently wrote "# Pipeline template: X\nsteps: []".
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "init", "--output", "pl.yaml"],
+            )
+            _ok(result)
+            text = open("pl.yaml").read()
+        assert "steps: []" not in text
+        assert "type: ingest" in text
+
+    def test_init_help_offers_only_real_templates(self, runner):
         result = runner.invoke(cli_module.main, ["pipeline", "init", "--help"])
-        for t in ["ingest-extract-kg", "rag", "ontology-build", "decision-track", "full"]:
-            assert t in result.output
+        _ok(result)
+        for gone in ["ingest-extract-kg", "decision-track", "ontology-build"]:
+            assert gone not in result.output
+        for real in ["document_processing", "rag_pipeline"]:
+            assert real in result.output
 
     def test_validate_requires_file(self, runner):
         result = runner.invoke(cli_module.main, ["pipeline", "validate"])
@@ -3530,6 +3233,178 @@ class TestPipeline:
     def test_validate_nonexistent_file_fails(self, runner):
         result = runner.invoke(cli_module.main, ["pipeline", "validate", "no_such.yaml"])
         assert result.exit_code != 0
+
+    def test_validate_reads_the_file_instead_of_the_path(self, runner):
+        # Regression: validate() was handed the *path string*. A str has no steps,
+        # so it type-checked nothing and reported valid for any input.
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("steps:\n  - name: a\n    type: ingest\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml", "--json"],
+            )
+        _ok(result)
+        payload = json.loads([
+            line for line in result.output.splitlines() if line.startswith("{")
+        ][-1])
+        assert payload["valid"] is True
+        assert payload["pipeline"] == "pl.yaml"
+        # The loader leaves handlers off, and the validator says so.
+        assert any("no handler" in w for w in payload["warnings"])
+
+    def test_validate_reports_a_missing_dependency(self, runner):
+        # Before the fix this exact file was reported valid, because it was never
+        # loaded.
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write(
+                    "steps:\n"
+                    "  - name: a\n"
+                    "    type: ingest\n"
+                    "    dependencies: [nope]\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml"],
+            )
+        assert result.exit_code != 0
+        assert "Missing dependency 'nope'" in _flatten(result.output)
+
+    def test_validate_rejects_a_file_that_is_not_a_pipeline(self, runner):
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("just a string\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml"],
+            )
+        assert result.exit_code != 0
+        assert "not a pipeline definition" in _flatten(result.output)
+
+    def test_validate_rejects_a_step_the_builder_would_drop(self, runner):
+        # build_pipeline() keeps a step only when both name and type are truthy,
+        # so a half-written step vanished before the validator ran and the file
+        # was reported valid (#2026).
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write(
+                    "steps:\n"
+                    "  - name: ingest\n"
+                    "    type: ingest\n"
+                    "  - name: broken\n"
+                    "    config: {}\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml"],
+            )
+        assert result.exit_code != 0
+        flat = _flatten(result.output)
+        assert "steps[1]" in flat
+        assert "broken" in flat
+        assert "non-empty 'type'" in flat
+
+    def test_validate_json_reports_a_dropped_step_in_its_own_shape(self, runner):
+        # The structured object has to survive the loader rejecting the file,
+        # otherwise --json callers only see the generic error envelope.
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write(
+                    "steps:\n"
+                    "  - name: ingest\n"
+                    "    type: ingest\n"
+                    "  - name: broken\n"
+                    "    config: {}\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml", "--json"],
+            )
+        assert result.exit_code != 0
+        payload = json.loads([
+            line for line in result.output.splitlines() if line.startswith("{")
+        ][-1])
+        assert payload["valid"] is False
+        assert payload["pipeline"] == "pl.yaml"
+        assert payload["errors"] == ["steps[1] ('broken') is missing a non-empty 'type'"]
+        assert payload["warnings"] == []
+
+    def test_validate_rejects_a_step_that_is_not_a_mapping(self, runner):
+        # Used to reach dict() inside deserialize_pipeline and surface as
+        # "dictionary update sequence element #0 has length 1; 2 is required".
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("steps:\n  - just-a-string\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml"],
+            )
+        assert result.exit_code != 0
+        flat = _flatten(result.output)
+        assert "steps[0] is not a mapping (got str)" in flat
+        assert "dictionary update sequence" not in flat
+
+    def test_validate_json_reports_a_builder_rejection_in_its_own_shape(self, runner):
+        # deserialize_pipeline() runs builder validation, which raises on a
+        # missing dependency. --json used to fall through to the error envelope
+        # on stderr instead of printing {valid, errors, warnings, pipeline}.
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write(
+                    "steps:\n"
+                    "  - name: orphan\n"
+                    "    type: export\n"
+                    "    dependencies: [does_not_exist]\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml", "--json"],
+            )
+        assert result.exit_code != 0
+        payload = json.loads([
+            line for line in result.output.splitlines() if line.startswith("{")
+        ][-1])
+        assert payload["valid"] is False
+        assert payload["errors"] == [
+            "Missing dependency 'does_not_exist' for step 'orphan'"
+        ]
+        assert payload["warnings"] == []
+        assert payload["pipeline"] == "pl.yaml"
+
+    def test_validate_json_keeps_the_object_for_a_non_pipeline_file(self, runner):
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("just a string\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "validate", "pl.yaml", "--json"],
+            )
+        assert result.exit_code != 0
+        payload = json.loads([
+            line for line in result.output.splitlines() if line.startswith("{")
+        ][-1])
+        assert payload["valid"] is False
+        assert "not a pipeline definition" in payload["errors"][0]
+
+    def test_run_rejects_a_step_the_builder_would_drop(self, runner):
+        # run loads through the same helper, so it must not silently execute a
+        # pipeline that is missing a step.
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write(
+                    "steps:\n"
+                    "  - name: ingest\n"
+                    "    type: ingest\n"
+                    "  - name: broken\n"
+                    "    config: {}\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "run", "pl.yaml"],
+            )
+        assert result.exit_code != 0
+        assert "steps[1]" in _flatten(result.output)
 
     def test_run_dry_run(self, runner):
         with runner.isolated_filesystem():
@@ -3542,22 +3417,110 @@ class TestPipeline:
         result = runner.invoke(cli_module.main, ["pipeline", "run"])
         assert result.exit_code != 0
 
-    def test_status_exits_0(self, runner):
-        with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
-            (_ for _ in ()).throw(ImportError(n))
-            if "pipeline" in n else _real_import(n, *a, **k)
-        )):
-            result = runner.invoke(cli_module.main, ["pipeline", "status"])
+    def test_run_refuses_steps_that_have_no_handler(self, runner):
+        # A pipeline loaded from a file can never carry handlers, and
+        # _execute_step() returns its input untouched when handler is None, so
+        # executing would report success having done nothing.
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("steps:\n  - name: ingest\n    type: ingest\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "run", "pl.yaml"],
+            )
         assert result.exit_code != 0
+        flat = _flatten(result.output)
+        assert "no handler" in flat
+        assert "ingest" in flat
+
+    def test_run_executes_a_pipeline_with_handlers(self, runner, monkeypatch):
+        # The wiring itself: execute_pipeline() has to receive the loaded Pipeline,
+        # and --parallel has to land on pipeline.config, the only place the engine
+        # reads parallelism from.
+        from semantica.pipeline import PipelineBuilder
+
+        builder = PipelineBuilder()
+        builder.register_step_handler("ingest", lambda data, **kw: data)
+        builder.add_step("ingest", "ingest")
+        handled = builder.build()
+
+        seen = {}
+
+        class _Engine:
+            def __init__(self, config=None):
+                seen["config"] = config
+
+            def execute_pipeline(self, pipeline, **options):
+                seen["pipeline"] = pipeline
+                return _fake_module(
+                    success=True,
+                    errors=[],
+                    metadata={"pipeline_id": pipeline.name, "execution_time": 0.5},
+                )
+
+        monkeypatch.setattr(cli_module, "_load_pipeline_file", lambda path: handled)
+        monkeypatch.setitem(__import__("sys").modules, "semantica.pipeline",
+                            _fake_module(ExecutionEngine=_Engine))
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("steps: []\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "run", "pl.yaml", "--parallel", "7"],
+            )
+        _ok(result)
+        assert seen["pipeline"] is handled
+        assert seen["pipeline"].config["parallelism"] == 7
+        assert "Pipeline completed" in _flatten(result.output)
+
+    def test_run_reports_a_failed_pipeline(self, runner, monkeypatch):
+        from semantica.pipeline import PipelineBuilder
+
+        builder = PipelineBuilder()
+        builder.register_step_handler("ingest", lambda data, **kw: data)
+        builder.add_step("ingest", "ingest")
+        handled = builder.build()
+
+        class _Engine:
+            def __init__(self, config=None):
+                pass
+
+            def execute_pipeline(self, pipeline, **options):
+                return _fake_module(success=False, errors=["boom"], metadata={})
+
+        monkeypatch.setattr(cli_module, "_load_pipeline_file", lambda path: handled)
+        monkeypatch.setitem(__import__("sys").modules, "semantica.pipeline",
+                            _fake_module(ExecutionEngine=_Engine))
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("steps: []\n")
+            result = runner.invoke(cli_module.main, ["pipeline", "run", "pl.yaml"])
+        assert result.exit_code != 0
+        assert "boom" in _flatten(result.output)
+
+    def test_run_rejects_watch(self, runner):
+        with runner.isolated_filesystem():
+            with open("pl.yaml", "w") as f:
+                f.write("steps:\n  - name: ingest\n    type: ingest\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["pipeline", "run", "pl.yaml", "--watch"],
+            )
+        assert result.exit_code != 0
+        assert "--watch" in _flatten(result.output)
+
+    def test_status_reports_it_cannot_observe_another_process(self, runner):
+        # The engine keeps pipeline status in memory, so a separate `pipeline run`
+        # process is not observable from here.
+        result = runner.invoke(cli_module.main, ["pipeline", "status"])
+        assert result.exit_code != 0
+        assert "no source of truth" in _flatten(result.output)
         assert "Traceback" not in result.output
 
-    def test_stop_exits_cleanly_on_import_error(self, runner):
-        with patch("builtins.__import__", side_effect=lambda n, *a, **k: (
-            (_ for _ in ()).throw(ImportError(n))
-            if "pipeline" in n else _real_import(n, *a, **k)
-        )):
-            result = runner.invoke(cli_module.main, ["pipeline", "stop"])
+    def test_stop_reports_it_cannot_reach_another_process(self, runner):
+        result = runner.invoke(cli_module.main, ["pipeline", "stop"])
         assert result.exit_code != 0
+        assert "nothing to stop" in _flatten(result.output)
         assert "Traceback" not in result.output
 
 
@@ -3903,8 +3866,17 @@ class TestBackup:
 
     def test_create_dry_run(self, runner):
         with runner.isolated_filesystem():
-            result = runner.invoke(cli_module.main, ["backup", "create", "backup.tar.gz", "--dry-run"])
+            os.makedirs("kg")
+            with open("kg/graph.db", "w") as f:
+                f.write("data")
+            with open("cfg.yaml", "w") as f:
+                f.write("graph_db:\n  backend: sqlite\n  path: kg\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "backup.tar.gz", "--dry-run"],
+            )
             _ok(result)
+            assert "Dry run: would backup create" in _flatten(result.output)
 
     def test_create_unencrypted_with_config_requires_confirm(self, runner):
         with runner.isolated_filesystem():
@@ -3928,10 +3900,729 @@ class TestBackup:
             )
         assert "Traceback" not in result.output
 
+    @pytest.mark.parametrize("extra", [["--strip-config"], [], ["--encrypt"]])
+    def test_create_without_stores_fails(self, runner, monkeypatch, tmp_path, extra):
+        # Regression for #1820: no store paths used to write an archive
+        # with "files": [] and exit 0. It must also fail before asking for
+        # a passphrase or confirmation.
+        monkeypatch.setattr(cli_module.Path, "home", staticmethod(lambda: tmp_path))
+        with runner.isolated_filesystem():
+            result = runner.invoke(
+                cli_module.main,
+                ["backup", "create", "out.tar.gz", "--quiet", *extra],
+            )
+            assert result.exit_code != 0
+            assert "No store data to back up" in result.output
+            assert "passphrase" not in result.output
+            assert "Continue without encryption" not in result.output
+            assert not os.path.exists("out.tar.gz")
+
+    def test_create_with_local_store_writes_its_files(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("kg")
+            with open("kg/graph.db", "w") as f:
+                f.write("data")
+            with open("cfg.yaml", "w") as f:
+                f.write("graph_db:\n  backend: sqlite\n  path: kg\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--quiet"],
+            )
+            _ok(result)
+            with tarfile.open("out.tar.gz") as tar:
+                names = tar.getnames()
+        assert "semantica-backup/graph/graph.db" in names
+
+    def test_create_reports_a_store_whose_path_is_missing(self, runner):
+        # Regression for #2009: a configured store whose path does not exist was
+        # dropped without a word, so the archive was partial and still reported
+        # success. The skip must be named, and recorded in the manifest.
+        with runner.isolated_filesystem():
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: missing_graph.json\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config"],
+            )
+            _ok(result)
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "missing_graph.json" in flat
+            with tarfile.open("out.tar.gz") as tar:
+                names = tar.getnames()
+                manifest = json.loads(
+                    tar.extractfile("semantica-backup/backup_manifest.json").read()
+                )
+        assert "semantica-backup/vector/index.json" in names
+        assert not any(n.startswith("semantica-backup/graph/") for n in names)
+        assert manifest["skipped"] == [
+            {"store": "graph", "backend": "local", "path": "missing_graph.json"}
+        ]
+
+    def test_create_fail_on_skip_exits_nonzero_without_writing(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: missing_graph.json\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--fail-on-skip"],
+            )
+            assert result.exit_code != 0
+            assert "Configured store path does not exist" in _flatten(result.output)
+            assert not os.path.exists("out.tar.gz")
+
+    def test_create_records_no_skipped_entries_when_paths_exist(self, runner):
+        # A store the caller simply has not configured is not a skip, and a
+        # backend with no local path key (cloud) must not be reported either.
+        with runner.isolated_filesystem():
+            os.makedirs("kg")
+            with open("kg/graph.db", "w") as f:
+                f.write("data")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: sqlite\n"
+                    "  path: kg\n"
+                    "vector_store:\n"
+                    "  backend: pinecone\n"
+                    "  index: demo\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config"],
+            )
+            _ok(result)
+            assert "Skipping" not in _flatten(result.output)
+            with tarfile.open("out.tar.gz") as tar:
+                manifest = json.loads(
+                    tar.extractfile("semantica-backup/backup_manifest.json").read()
+                )
+        assert manifest["skipped"] == []
+
+    def test_collect_backup_sources_separates_missing_paths(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            cfg = {
+                "graph_db": {"backend": "local", "path": "gone.json"},
+                "vector_store": {"backend": "local", "path": "vecs"},
+                "triplet_store": {"backend": "pinecone", "index": "demo"},
+            }
+            sources, skipped = cli_module._collect_backup_sources(
+                cfg, None, "all", strip_config=True,
+            )
+        assert [arcname for arcname, _ in sources] == ["vector/index.json"]
+        assert skipped == [
+            {"store": "graph", "backend": "local", "path": "gone.json"}
+        ]
+
+    def test_create_reports_a_store_whose_directory_is_empty(self, runner):
+        # Regression for #2014: a configured store whose path exists but holds
+        # no files took the is_dir() branch, contributed nothing, and never
+        # reached `skipped`, so the manifest reported "skipped": [] and the
+        # command exited 0.
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config"],
+            )
+            _ok(result)
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "empty_graph" in flat
+            with tarfile.open("out.tar.gz") as tar:
+                manifest = json.loads(
+                    tar.extractfile("semantica-backup/backup_manifest.json").read()
+                )
+        assert manifest["skipped"] == [
+            {"store": "graph", "backend": "local", "path": "empty_graph"}
+        ]
+
+    def test_create_empty_dir_fail_on_skip_exits_nonzero(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--fail-on-skip"],
+            )
+            assert result.exit_code != 0
+            assert "Configured store path does not exist" in _flatten(result.output)
+            assert not os.path.exists("out.tar.gz")
+
+    def test_create_dry_run_fail_on_skip_exits_nonzero(self, runner):
+        # #2109: a dry run has to match the real command.
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--dry-run", "--fail-on-skip"],
+            )
+            assert result.exit_code != 0
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "empty_graph" in flat
+            assert "Configured store path does not exist" in flat
+            assert not os.path.exists("out.tar.gz")
+
+    @pytest.mark.parametrize("extra_args", [[], ["--fail-on-skip"]])
+    def test_create_dry_run_fails_when_no_store_has_data(self, runner, extra_args):
+        # #2122: --dry-run previewed a backup the real command refuses to
+        # write, so it exited 0 on a config where nothing would be archived.
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: missing_vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--dry-run", *extra_args],
+            )
+            assert result.exit_code != 0
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "empty_graph" in flat
+            assert "Skipping vector store" in flat
+            assert "missing_vecs" in flat
+            assert "No store data to back up" in flat
+            assert "Dry run: would backup create" not in flat
+            assert not os.path.exists("out.tar.gz")
+
+    def test_create_dry_run_without_store_config_fails(self, runner):
+        # Same #2122 case as above with no store configured at all: the real
+        # command refuses it (#1820), so the preview must too.
+        with runner.isolated_filesystem():
+            with open("cfg.yaml", "w") as f:
+                f.write("processing:\n  batch_size: 8\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--dry-run"],
+            )
+            assert result.exit_code != 0
+            flat = _flatten(result.output)
+            assert "No store data to back up" in flat
+            assert "Skipping" not in flat
+
+    def test_create_dry_run_json_fails_when_no_store_has_data(self, runner):
+        # --json must not print a payload for a preview that cannot happen.
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            with open("cfg.yaml", "w") as f:
+                f.write("graph_db:\n  backend: local\n  path: empty_graph\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "--json", "backup", "create",
+                 "out.tar.gz", "--strip-config", "--dry-run"],
+            )
+            assert result.exit_code != 0
+            assert result.stdout.strip() == ""
+            assert "No store data to back up" in _flatten(result.stderr)
+
+    def test_create_dry_run_reports_a_skipped_store(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--dry-run"],
+            )
+            _ok(result)
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "empty_graph" in flat
+            assert not os.path.exists("out.tar.gz")
+
+    def test_create_dry_run_json_stays_parseable_when_a_store_is_skipped(self, runner):
+        # #2110 review: the skip warning used to land on stdout ahead of the
+        # payload, so --json could not be parsed in exactly the case this PR
+        # fixes.
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "--json", "backup", "create",
+                 "out.tar.gz", "--strip-config", "--dry-run"],
+            )
+            _ok(result)
+            payload = json.loads(result.stdout)
+            assert payload["skipped"] == [
+                {"store": "graph", "backend": "local", "path": "empty_graph"}
+            ]
+            assert "Skipping graph store" in result.stderr
+            assert not os.path.exists("out.tar.gz")
+
+    def test_sync_dry_run_json_stays_parseable_when_a_store_is_skipped(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "--json", "backup", "sync",
+                 "sync_dest", "--dry-run"],
+            )
+            _ok(result)
+            payload = json.loads(result.stdout)
+            assert payload["skipped"] == [
+                {"store": "graph", "backend": "local", "path": "empty_graph"}
+            ]
+            assert "Skipping graph store" in result.stderr
+            assert not os.path.exists("sync_dest")
+
+    def test_no_color_strips_colour_from_the_json_warning_on_stderr(
+        self, runner, monkeypatch
+    ):
+        # Under --json the warning goes to err_console, not console. Give that
+        # console a forced terminal first, so a rebind that misses it would
+        # leave escape codes in the captured stderr.
+        monkeypatch.setenv("TERM", "xterm-256color")
+        original = cli_module.err_console
+        cli_module.err_console = cli_module.Console(stderr=True, force_terminal=True)
+        try:
+            with runner.isolated_filesystem():
+                os.makedirs("empty_graph")
+                os.makedirs("vecs")
+                with open("vecs/index.json", "w") as f:
+                    f.write("{}")
+                with open("cfg.yaml", "w") as f:
+                    f.write(
+                        "graph_db:\n"
+                        "  backend: local\n"
+                        "  path: empty_graph\n"
+                        "vector_store:\n"
+                        "  backend: local\n"
+                        "  path: vecs\n"
+                    )
+                result = runner.invoke(
+                    cli_module.main,
+                    [
+                        "--config",
+                        "cfg.yaml",
+                        "--json",
+                        "--no-color",
+                        "backup",
+                        "sync",
+                        "sync_dest",
+                        "--dry-run",
+                    ],
+                )
+                _ok(result)
+                assert "Skipping graph store" in result.stderr
+                assert "\x1b[" not in result.stderr
+        finally:
+            cli_module.err_console = original
+
+    def test_dry_run_json_reports_no_skips_when_every_store_is_present(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "--json", "backup", "create",
+                 "out.tar.gz", "--strip-config", "--dry-run"],
+            )
+            _ok(result)
+            assert json.loads(result.stdout)["skipped"] == []
+
+    def test_collect_backup_sources_marks_empty_directories_as_skipped(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            cfg = {
+                "graph_db": {"backend": "local", "path": "empty_graph"},
+                "vector_store": {"backend": "local", "path": "vecs"},
+            }
+            sources, skipped = cli_module._collect_backup_sources(
+                cfg, None, "all", strip_config=True,
+            )
+        assert [arcname for arcname, _ in sources] == ["vector/index.json"]
+        assert skipped == [
+            {"store": "graph", "backend": "local", "path": "empty_graph"}
+        ]
+
+    def test_collect_backup_sources_reports_empty_ontology_directory(self, runner):
+        # #2014 also flagged the ontology branch: an existing-but-empty (or
+        # absent) ontology path produced no sources and no skip entry.
+        with runner.isolated_filesystem():
+            os.makedirs("empty_onto")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            cfg = {
+                "ontology_path": "empty_onto",
+                "vector_store": {"backend": "local", "path": "vecs"},
+            }
+            sources, skipped = cli_module._collect_backup_sources(
+                cfg, None, "all", strip_config=True,
+            )
+        assert [arcname for arcname, _ in sources] == ["vector/index.json"]
+        assert skipped == [
+            {"store": "ontology", "backend": "file", "path": "empty_onto"}
+        ]
+
+    def test_sync_names_a_skipped_store(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "sync", "sync_dest"],
+            )
+            _ok(result)
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "empty_graph" in flat
+            assert os.path.isfile(os.path.join("sync_dest", "vector", "index.json"))
+
+    def test_sync_fail_on_skip_exits_nonzero(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "sync", "sync_dest",
+                 "--fail-on-skip"],
+            )
+            assert result.exit_code != 0
+            assert "Configured store path does not exist" in _flatten(result.output)
+            assert not os.path.exists("sync_dest")
+
+    def test_sync_dry_run_fail_on_skip_exits_nonzero(self, runner):
+        # #2109: the dry-run branch used to return before the skip handling.
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "sync", "sync_dest",
+                 "--dry-run", "--fail-on-skip"],
+            )
+            assert result.exit_code != 0
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "empty_graph" in flat
+            assert "Configured store path does not exist" in flat
+            assert not os.path.exists("sync_dest")
+
+    def test_sync_dry_run_reports_a_skipped_store(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("empty_graph")
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: empty_graph\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "sync", "sync_dest",
+                 "--dry-run"],
+            )
+            _ok(result)
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "empty_graph" in flat
+            assert not os.path.exists("sync_dest")
+
+    def test_sync_without_skips_does_not_warn(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("kg")
+            with open("kg/graph.db", "w") as f:
+                f.write("data")
+            with open("cfg.yaml", "w") as f:
+                f.write("graph_db:\n  backend: sqlite\n  path: kg\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "sync", "sync_dest"],
+            )
+            _ok(result)
+            assert "Skipping" not in _flatten(result.output)
+
+    @pytest.mark.parametrize("extra_args", [[], ["--fail-on-skip"]])
+    def test_create_names_every_missing_store_when_none_exist(self, runner, extra_args):
+        # When every configured store path is missing, the empty-archive error
+        # (#1820) still fires, but each missing path must be named first.
+        with runner.isolated_filesystem():
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: local\n"
+                    "  path: missing_graph.json\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: missing_vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", *extra_args],
+            )
+            assert result.exit_code != 0
+            flat = _flatten(result.output)
+            assert "Skipping graph store" in flat
+            assert "missing_graph.json" in flat
+            assert "Skipping vector store" in flat
+            assert "missing_vecs" in flat
+            assert "No store data to back up" in flat
+            assert not os.path.exists("out.tar.gz")
+
+    def test_create_without_store_config_reports_no_skip(self, runner):
+        # No store configured at all is the #1820 case, not a skip.
+        with runner.isolated_filesystem():
+            with open("cfg.yaml", "w") as f:
+                f.write("processing:\n  batch_size: 8\n")
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config"],
+            )
+            assert result.exit_code != 0
+            flat = _flatten(result.output)
+            assert "No store data to back up" in flat
+            assert "Skipping" not in flat
+
+    def test_create_redacts_credentials_in_skipped_path(self, runner):
+        # A credential-bearing path must not reach the warning or the
+        # manifest, even with --strip-config.
+        with runner.isolated_filesystem():
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: sqlite\n"
+                    "  path: 'postgresql://user:s3cretpw@db.example/kg'\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config"],
+            )
+            _ok(result)
+            assert "s3cretpw" not in result.output
+            assert "Skipping graph store" in _flatten(result.output)
+            with tarfile.open("out.tar.gz") as tar:
+                raw = tar.extractfile(
+                    "semantica-backup/backup_manifest.json"
+                ).read().decode("utf-8")
+        assert "s3cretpw" not in raw
+        manifest = json.loads(raw)
+        assert len(manifest["skipped"]) == 1
+        assert manifest["skipped"][0]["path"].startswith("postgresql://user:")
+        assert manifest["skipped"][0]["path"].endswith("@db.example/kg")
+
+    def test_create_fail_on_skip_redacts_credentials(self, runner):
+        with runner.isolated_filesystem():
+            os.makedirs("vecs")
+            with open("vecs/index.json", "w") as f:
+                f.write("{}")
+            with open("cfg.yaml", "w") as f:
+                f.write(
+                    "graph_db:\n"
+                    "  backend: sqlite\n"
+                    "  path: 'postgresql://user:s3cretpw@db.example/kg'\n"
+                    "vector_store:\n"
+                    "  backend: local\n"
+                    "  path: vecs\n"
+                )
+            result = runner.invoke(
+                cli_module.main,
+                ["--config", "cfg.yaml", "backup", "create", "out.tar.gz",
+                 "--strip-config", "--fail-on-skip"],
+            )
+            assert result.exit_code != 0
+            assert "Configured store path does not exist" in _flatten(result.output)
+            assert "s3cretpw" not in result.output
+            assert not os.path.exists("out.tar.gz")
+
+    def test_collect_backup_sources_redacts_but_checks_the_real_path(self, runner):
+        # The redacted form is only for reporting; an existing path containing
+        # ":...@" must still be found and archived under its real name.
+        with runner.isolated_filesystem():
+            os.makedirs("a:b@c")
+            with open("a:b@c/index.json", "w") as f:
+                f.write("{}")
+            cfg = {
+                "graph_db": {"backend": "sqlite",
+                             "path": "postgresql://user:s3cretpw@db.example/kg"},
+                "vector_store": {"backend": "local", "path": "a:b@c"},
+            }
+            sources, skipped = cli_module._collect_backup_sources(
+                cfg, None, "all", strip_config=True,
+            )
+        assert [arcname for arcname, _ in sources] == ["vector/index.json"]
+        assert [str(p) for _, p in sources] == [os.path.join("a:b@c", "index.json")]
+        assert len(skipped) == 1
+        assert "s3cretpw" not in skipped[0]["path"]
+
     def test_create_dry_run_json(self, runner):
         # backup create has no per-command --json; use global --json
-        result = runner.invoke(cli_module.main, ["--json", "backup", "create", "backup.tar.gz",
-                                      "--dry-run"])
+        with runner.isolated_filesystem():
+            os.makedirs("kg")
+            with open("kg/graph.db", "w") as f:
+                f.write("data")
+            with open("cfg.yaml", "w") as f:
+                f.write("graph_db:\n  backend: sqlite\n  path: kg\n")
+            result = runner.invoke(cli_module.main, ["--config", "cfg.yaml", "--json",
+                                      "backup", "create", "backup.tar.gz", "--dry-run"])
         _ok(result)
         data = _json_output(result)
         assert data["dry_run"] is True
@@ -4503,6 +5194,212 @@ class TestDoctorEmbeddingHintsAndEnv:
         assert "hash fallback" in st["note"], "padded/caps env value must enable deep mode"
 
 
+class TestDoctorBackendEnvResolution:
+    """#1818: doctor must report the MCP server's stores, which are configured
+    only through ``SEMANTICA_VECTOR_*`` / ``SEMANTICA_KG_PATH``.
+
+    Those variables never change what CLI commands build, so they get their own
+    rows resolved by the server's session helpers instead of being folded into
+    the CLI's vector and graph checks.
+    """
+
+    _MCP_ENV = (
+        "SEMANTICA_VECTOR_BACKEND",
+        "SEMANTICA_VECTOR_DB_PATH",
+        "SEMANTICA_VECTOR_PATH",
+        "SEMANTICA_KG_PATH",
+    )
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for var in self._MCP_ENV:
+            monkeypatch.delenv(var, raising=False)
+
+    @pytest.fixture
+    def cfg(self, tmp_path):
+        # graph_db.path keeps the CLI graph row off the real ~/.semantica.
+        def _write(extra=""):
+            path = tmp_path / "cfg.yaml"
+            path.write_text(
+                "graph_db:\n  backend: memory\n"
+                f"  path: {tmp_path / 'cli_graph.json'}\n" + extra
+            )
+            return str(path)
+
+        return _write
+
+    def _checks(self, runner, config):
+        args = ["--config", config, "doctor", "--json"]
+        result = runner.invoke(cli_module.main, args)
+        _ok(result)
+        return {c["check"]: c for c in json.loads(result.output)}
+
+    @staticmethod
+    def _without_faiss(monkeypatch):
+        monkeypatch.setitem(sys.modules, "faiss", None)
+
+    @staticmethod
+    def _with_faiss(monkeypatch):
+        monkeypatch.setitem(sys.modules, "faiss", types.ModuleType("faiss"))
+
+    @staticmethod
+    def _sqlite_vec_loads(monkeypatch):
+        monkeypatch.setattr(cli_module, "_probe_sqlite_vec", lambda: None)
+
+    @staticmethod
+    def _save_graph_with_one_decision(path):
+        from semantica.context import ContextGraph
+
+        graph = ContextGraph()
+        graph.record_decision(
+            category="vendor_selection",
+            scenario="Pick a vector backend",
+            reasoning="sqlite-vec needs no server",
+            outcome="selected_sqlite",
+            confidence=0.9,
+        )
+        graph.save_to_file(path)
+
+    def test_no_mcp_rows_without_mcp_env(self, runner, cfg):
+        checks = self._checks(runner, cfg())
+        assert "MCP vector store" not in checks
+        assert "MCP graph" not in checks
+
+    def test_reports_the_mcp_sqlite_store(self, runner, cfg, tmp_path, monkeypatch):
+        self._sqlite_vec_loads(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", " SQLite ")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "ok"
+        assert row["note"] == "sqlite-vec loaded"
+
+    def test_mcp_env_is_read_even_when_init_wrote_a_cli_backend(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        # `semantica init` writes vector_store.backend: faiss by default; that
+        # must neither hide the MCP store nor be replaced by it.
+        self._with_faiss(monkeypatch)
+        self._sqlite_vec_loads(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        checks = self._checks(runner, cfg("vector_store:\n  backend: faiss\n"))
+        assert checks["MCP vector store"]["note"] == "sqlite-vec loaded"
+        assert checks["Vector store"]["note"] == "faiss importable"
+
+    def test_mcp_vector_defaults_to_inmemory(self, runner, cfg, tmp_path, monkeypatch):
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "kg.json"))
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "ok"
+        assert row["note"] == "inmemory"
+
+    def test_flags_sqlite_without_a_db_path(self, runner, cfg, monkeypatch):
+        # The server refuses to start this way, so doctor must not pass it.
+        self._sqlite_vec_loads(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "SEMANTICA_VECTOR_DB_PATH" in row["note"]
+
+    def test_flags_an_unsupported_mcp_backend(self, runner, cfg, monkeypatch):
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "faiss")
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "supported backends: inmemory, sqlite" in row["note"]
+
+    def test_flags_a_missing_sqlite_vec(self, runner, cfg, tmp_path, monkeypatch):
+        import semantica.vector_store.sqlite_vec_store as sqlite_store
+
+        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", False)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "not installed" in row["note"]
+        assert "vectorstore-sqlite" in row["hint"]
+
+    def test_flags_a_sqlite_vec_that_fails_to_load(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        # Discoverable but unloadable must fail: the probe runs the store's
+        # real load path rather than trusting find_spec.
+        import semantica.vector_store.sqlite_vec_store as sqlite_store
+        from semantica.utils.exceptions import ProcessingError
+
+        def _boom(**_):
+            raise ProcessingError("Failed to load sqlite-vec extension: boom")
+
+        monkeypatch.setattr(sqlite_store, "SQLITE_VEC_AVAILABLE", True)
+        monkeypatch.setattr(sqlite_store, "SQLiteVecStore", _boom)
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "sqlite")
+        monkeypatch.setenv("SEMANTICA_VECTOR_DB_PATH", str(tmp_path / "v.db"))
+        row = self._checks(runner, cfg())["MCP vector store"]
+        assert row["status"] == "fail"
+        assert "Failed to load sqlite-vec extension" in row["note"]
+
+    def test_unconfigured_faiss_is_a_warning_for_an_mcp_deployment(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        self._without_faiss(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "kg.json"))
+        row = self._checks(runner, cfg())["Vector store"]
+        assert row["status"] == "warn"
+        assert "CLI default" in row["note"]
+
+    def test_unconfigured_faiss_still_fails_without_mcp_env(
+        self, runner, cfg, monkeypatch
+    ):
+        self._without_faiss(monkeypatch)
+        assert self._checks(runner, cfg())["Vector store"]["status"] == "fail"
+
+    def test_configured_faiss_still_fails_for_an_mcp_deployment(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        self._without_faiss(monkeypatch)
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(tmp_path / "kg.json"))
+        config = cfg("vector_store:\n  backend: faiss\n")
+        assert self._checks(runner, config)["Vector store"]["status"] == "fail"
+
+    def test_mcp_graph_counts_decisions_from_kg_path(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        kg = tmp_path / "mcp_graph.json"
+        self._save_graph_with_one_decision(kg)
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(kg))
+        checks = self._checks(runner, cfg())
+        assert checks["MCP graph"]["status"] == "ok"
+        assert checks["MCP graph"]["note"] == "1 decision(s)"
+        # The CLI graph is a different file; it must not report the MCP one.
+        assert checks["Graph store"]["note"] == "memory, 0 decision(s)"
+
+    def test_mcp_graph_accepts_an_empty_or_missing_file(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        # The server starts empty from both, so neither is a failure.
+        empty = tmp_path / "empty.json"
+        empty.write_text("")
+        for path in (empty, tmp_path / "missing.json"):
+            monkeypatch.setenv("SEMANTICA_KG_PATH", str(path))
+            row = self._checks(runner, cfg())["MCP graph"]
+            assert row["status"] == "ok"
+            assert row["note"] == "new graph, created on first save"
+
+    def test_mcp_graph_flags_an_unreadable_file(
+        self, runner, cfg, tmp_path, monkeypatch
+    ):
+        kg = tmp_path / "corrupt.json"
+        kg.write_text("{not json")
+        monkeypatch.setenv("SEMANTICA_KG_PATH", str(kg))
+        row = self._checks(runner, cfg())["MCP graph"]
+        assert row["status"] == "fail"
+        assert "persistence would be disabled" in row["note"]
+
+    def test_mcp_graph_without_kg_path_is_in_memory(self, runner, cfg, monkeypatch):
+        monkeypatch.setenv("SEMANTICA_VECTOR_BACKEND", "inmemory")
+        row = self._checks(runner, cfg())["MCP graph"]
+        assert row["status"] == "ok"
+        assert "not persisted" in row["note"]
+
+
 class TestDoctorTableLayout:
     """#1428 + Qodo review: doctor table must keep Check labels and Hint text
     readable at a normal 80-column terminal.
@@ -5051,6 +5948,213 @@ class TestOntologyAlignOutput:
         # pd.read_json(lines=True) must succeed — this is what the F2 bug broke.
         df = pd.read_json(out, lines=True)
         assert "alignments" in df.columns
+
+
+class TestProvenanceCliStorageEnv:
+    """#1810: `semantica provenance audit` must read the DB the Explorer writes.
+
+    The CLI builds ``ProvenanceManager(config=...)`` with no storage path, so
+    before the fix every read command inspected a fresh in-memory store and the
+    env var the Explorer honours was invisible to it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_storage(self, monkeypatch):
+        from semantica.provenance import ProvenanceManager
+
+        monkeypatch.delenv("SEMANTICA_PROVENANCE_DB", raising=False)
+        monkeypatch.delenv("EXPLORER_PROVENANCE_DB", raising=False)
+        original = ProvenanceManager._default_storage_path
+        ProvenanceManager._default_storage_path = None
+        try:
+            yield
+        finally:
+            ProvenanceManager._default_storage_path = original
+
+    @staticmethod
+    def _seed_db(path):
+        from semantica.provenance import ProvenanceManager
+
+        writer = ProvenanceManager(storage_path=str(path))
+        writer.track_entity(
+            entity_id="ent1", source="t.py", activity="creation", agent="tester"
+        )
+        writer.track_entity(
+            entity_id="ent2", source="t.py", activity="creation", agent="tester"
+        )
+
+    def test_audit_reads_the_db_named_by_the_env_var(
+        self, runner, monkeypatch, tmp_path
+    ):
+        db = tmp_path / "cli_prov.db"
+        self._seed_db(db)
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(db))
+
+        result = runner.invoke(
+            cli_module.main, ["provenance", "audit", "--format", "json", "--json"]
+        )
+        _ok(result)
+        entries = json.loads(result.output.strip())
+        assert [e["entity_id"] for e in entries] == ["ent1", "ent2"]
+
+    def test_audit_is_empty_when_no_env_var_points_at_a_db(self, runner, tmp_path):
+        self._seed_db(tmp_path / "cli_prov.db")
+
+        result = runner.invoke(
+            cli_module.main, ["provenance", "audit", "--format", "json", "--json"]
+        )
+        _ok(result)
+        assert json.loads(result.output.strip()) == []
+
+    def test_configured_storage_path_wins_over_the_env_var(
+        self, runner, monkeypatch, tmp_path
+    ):
+        configured = tmp_path / "configured.db"
+        self._seed_db(configured)
+        monkeypatch.setenv("SEMANTICA_PROVENANCE__STORAGE_PATH", str(configured))
+        monkeypatch.setenv("SEMANTICA_PROVENANCE_DB", str(tmp_path / "other.db"))
+
+        result = runner.invoke(
+            cli_module.main, ["provenance", "audit", "--format", "json", "--json"]
+        )
+        _ok(result)
+        entries = json.loads(result.output.strip())
+        assert [e["entity_id"] for e in entries] == ["ent1", "ent2"]
+        assert not (tmp_path / "other.db").exists()
+
+
+class _FakeUrlopenResponse:
+    """Minimal context-manager response for a stubbed urllib.request.urlopen."""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def __enter__(self) -> "_FakeUrlopenResponse":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+def _stub_release(monkeypatch, tag_name: str) -> None:
+    """Make the changelog's GitHub release lookup return *tag_name*."""
+    import urllib.request
+
+    payload = json.dumps({"tag_name": tag_name, "body": "", "html_url": ""}).encode()
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *a, **kw: _FakeUrlopenResponse(payload),
+    )
+
+
+class TestChangelogVersionTag:
+    """changelog must strip the "v" prefix, not a run of leading characters.
+
+    Regression for #1845: ``tag.lstrip("v")`` treats "v" as a character set, so
+    a tag like ``vv1.2.3`` lost both leading v's. ``removeprefix("v")`` strips
+    exactly one, which is the documented intent.
+    """
+
+    @pytest.mark.parametrize(
+        "tag_name,expected",
+        [
+            ("v1.2.3", "1.2.3"),
+            ("vv1.2.3", "v1.2.3"),
+            ("1.2.3", "1.2.3"),
+        ],
+    )
+    def test_changelog_json_latest_strips_one_v(
+        self, runner, monkeypatch, tag_name, expected
+    ):
+        _stub_release(monkeypatch, tag_name)
+        result = runner.invoke(cli_module.main, ["changelog", "--json"])
+        _ok(result)
+        assert json.loads(result.output)["latest"] == expected
+
+
+class TestChangelogUpdateCheck:
+    """changelog must order versions, not compare them as strings.
+
+    A build ahead of the latest release (e.g. 0.8.0 against a v0.7.0 tag) used
+    to be told "Update available: 0.8.0 → 0.7.0", recommending a downgrade.
+    """
+
+    @pytest.mark.parametrize(
+        "current,tag_name,expected",
+        [
+            ("0.7.0", "v0.8.0", True),
+            ("0.8.0", "v0.8.0", False),
+            ("0.8", "v0.8.0", False),
+            ("0.8.0", "v0.7.0", False),
+            ("0.8.0.dev1", "v0.7.0", False),
+            ("0.8.0rc1", "v0.8.0", True),
+            ("0.8.0", "unknown", None),
+        ],
+    )
+    def test_changelog_json_update_available(
+        self, runner, monkeypatch, current, tag_name, expected
+    ):
+        _stub_release(monkeypatch, tag_name)
+        monkeypatch.setattr(cli_module, "__version__", current)
+        result = runner.invoke(cli_module.main, ["changelog", "--json"])
+        _ok(result)
+        assert json.loads(result.output)["update_available"] is expected
+
+    @pytest.mark.parametrize(
+        "current,tag_name,shown,hidden",
+        [
+            ("0.7.0", "v0.8.0", "Update available", "ahead of the latest"),
+            ("0.8.0", "v0.8.0", "on the latest version", "Update available"),
+            ("0.8.0", "v0.7.0", "ahead of the latest", "Update available"),
+            ("0.8.0", "unknown", "Could not compare", "Update available"),
+        ],
+    )
+    def test_changelog_status_line(
+        self, runner, monkeypatch, current, tag_name, shown, hidden
+    ):
+        _stub_release(monkeypatch, tag_name)
+        monkeypatch.setattr(cli_module, "__version__", current)
+        result = runner.invoke(cli_module.main, ["changelog"])
+        _ok(result)
+        assert shown in result.output
+        assert hidden not in result.output
+
+
+class TestChangelogWithoutPackaging:
+    """packaging is not a core dependency (#1513), so a slim install may lack it.
+
+    The fallback must still order plain X.Y.Z releases and must never report
+    an update it cannot establish.
+    """
+
+    @pytest.mark.parametrize(
+        "current,tag_name,expected",
+        [
+            ("0.7.0", "v0.8.0", True),
+            ("0.8.0", "v0.7.0", False),
+            ("0.8", "v0.8.0", False),
+            ("0.10.0", "v0.9.0", False),
+            ("0.8.0.dev1", "v0.8.0.dev1", False),
+            ("0.8.0.dev1", "v0.7.0", None),
+            ("0.8.0", "unknown", None),
+        ],
+    )
+    def test_changelog_json_update_available_without_packaging(
+        self, runner, monkeypatch, current, tag_name, expected
+    ):
+        import sys
+
+        # A None entry makes ``from packaging.version import ...`` raise ImportError.
+        monkeypatch.setitem(sys.modules, "packaging.version", None)
+        _stub_release(monkeypatch, tag_name)
+        monkeypatch.setattr(cli_module, "__version__", current)
+        result = runner.invoke(cli_module.main, ["changelog", "--json"])
+        _ok(result)
+        assert json.loads(result.output)["update_available"] is expected
 
 
 # ─── subcommand smoke ─────────────────────────────────────────────────────────
