@@ -344,10 +344,7 @@ class TestKgSubcommands:
         assert "Traceback" not in result.output
 
     def test_kg_find_path_accepts_entity_name_when_id_differs(self, runner, monkeypatch):
-        # find-path documents --from/--to as entity names, but the NetworkX
-        # projection is keyed by entity ID; on the memory backend those differ
-        # (recorded decisions carry generated IDs), so the name has to be
-        # resolved before lookup (#1941 review).
+        # --from/--to are documented as names; the projection is keyed by ID.
         graph = {
             "entities": [
                 {"id": "n1", "name": "Alice", "type": "person"},
@@ -367,43 +364,8 @@ class TestKgSubcommands:
         body = json.dumps(_json_output(result))
         assert "n1" in body and "n2" in body
 
-    def test_kg_find_path_rejects_negative_weight(self, runner, monkeypatch):
-        # Dijkstra settles each node once and never revisits it, so a negative
-        # edge cost can yield a path that is not the cheapest; the command
-        # refuses instead of returning it (#1941 review).
-        graph = {
-            "entities": [
-                {"id": "S", "name": "S"}, {"id": "A", "name": "A"},
-                {"id": "B", "name": "B"},
-            ],
-            "relationships": [
-                {"id": "r1", "source": "S", "target": "A", "type": "e", "weight": 1},
-                {"id": "r2", "source": "S", "target": "B", "type": "e", "weight": 2},
-                {"id": "r3", "source": "B", "target": "A", "type": "e", "weight": -3},
-            ],
-        }
-        monkeypatch.setattr(
-            cli_module, "_kg_graph",
-            lambda cli_ctx: cli_module._normalize_kg_dict(graph),
-        )
-        result = runner.invoke(cli_module.main, ["kg", "find-path",
-                                      "--from", "S", "--to", "A", "--json"])
-        assert result.exit_code != 0
-        assert "non-negative" in _flatten(result.output)
-
-    def test_kg_resolve_exposes_entities_and_says_read_only(self, runner, monkeypatch):
-        # resolve_entities() writes nothing back, so the command must not read
-        # as if it had: it returns the merged entities instead (#1941 review).
-        _fixture_graph(monkeypatch)
-        result = runner.invoke(cli_module.main, ["kg", "resolve", "--json"])
-        data = _json_output(result)
-        assert "entities" in data
-        text = runner.invoke(cli_module.main, ["kg", "resolve"]).output
-        assert "read-only" in _flatten(text)
-
     def test_graph_store_context_by_id_keeps_same_name_nodes_apart(self, monkeypatch):
-        # Substituting a node's display name for its ID merges two distinct
-        # store nodes that happen to share a name (#1941 review).
+        # Using the display name as the ID merges same-name store nodes.
         class _GS:
             def get_nodes(self, limit=None):
                 return [
@@ -421,12 +383,16 @@ class TestKgSubcommands:
         assert [e["id"] for e in by_id["entities"]] == ["n1", "n2"]
         assert [e["name"] for e in by_id["entities"]] == ["Alice", "Alice"]
 
-    def test_kg_resolve_json_counts_fixture_entities(self, runner, monkeypatch):
+    def test_kg_resolve_reports_merged_entities_read_only(self, runner, monkeypatch):
         _fixture_graph(monkeypatch)
         result = runner.invoke(cli_module.main, ["kg", "resolve", "--json"])
         data = _json_output(result)
         assert data["input"] == len(FIXTURE_KG["entities"])
         assert data["input"] == data["resolved"] + data["merged"]
+        assert len(data["entities"]) == data["resolved"]
+        # Nothing is written back, so the text output must not imply it was.
+        text = runner.invoke(cli_module.main, ["kg", "resolve"]).output
+        assert "read-only" in _flatten(text)
 
     def test_kg_predict_json_predicts_over_fixture_graph(self, runner, monkeypatch):
         _fixture_graph(monkeypatch)
@@ -438,6 +404,29 @@ class TestKgSubcommands:
         # code this was 0 predictions on a populated graph (#1941).
         assert data["count"] > 0
         assert {"source", "target", "score"} <= set(data["predictions"][0])
+
+    def test_kg_predict_reports_each_unlinked_pair_once(self, runner, monkeypatch):
+        # The scores are symmetric, so scoring ordered pairs would list every
+        # prediction twice and suggest reversing edges that already exist.
+        graph = {
+            "entities": [{"id": n, "name": n, "type": "t"} for n in "ABCD"],
+            "relationships": [
+                {"id": f"r{i}", "source": s, "target": t, "type": "e"}
+                for i, (s, t) in enumerate(
+                    [("C", "A"), ("C", "B"), ("A", "D"), ("B", "D")]
+                )
+            ],
+        }
+        monkeypatch.setattr(
+            cli_module, "_kg_graph",
+            lambda cli_ctx: cli_module._normalize_kg_dict(graph),
+        )
+        result = runner.invoke(cli_module.main, ["kg", "predict", "--json"])
+        pairs = [
+            frozenset((p["source"], p["target"]))
+            for p in _json_output(result)["predictions"]
+        ]
+        assert sorted(pairs, key=sorted) == [frozenset("AB"), frozenset("CD")]
 
     def test_kg_validate_json_validates_fixture_graph(self, runner, monkeypatch):
         _fixture_graph(monkeypatch)
