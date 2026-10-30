@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`create_translation_chain()` left earlier steps recorded when a later provenance write failed** (#2153, follow-up to #2137 / #2139) by @pkupt
+  - The chain now writes its provenance through a single transaction on backends that can roll back (SQLite, in-memory), so a failing step no longer leaves the `<input>_transformed_<axiom>` entities created by the steps before it. `BridgeAxiom.apply()` takes an internal `_conn` and passes it to `track_entity()`
+  - Backends without transaction support keep writing step by step; the `ProvenanceRecordingError` now carries `recorded_entities` listing what is actually in the store, so a caller can clean up or resume
+  - `create_translation_chain()` accepts `require_provenance` (default `True`, unchanged behavior) to run a chain best-effort. Each layer reports `provenance_recorded`/`provenance_error` and failed steps are collected in `chain.metadata["provenance_failures"]`. New tests in `tests/provenance/test_translation_chain_rollback_2153.py`
+
 - **Parquet and Arrow relationship export lost graph-backend endpoint names** (refs #2018) by @george07-t
   - `ParquetExporter.export_relationships()` and `ArrowExporter.export_relationships()` read only `source`/`source_id` and `target`/`target_id`, so a record shaped by a graph backend (`start_node_id`/`end_node_id` from Neo4j, FalkorDB and Neptune, `start_id`/`end_id` from raw AGE edges) made Parquet raise `ValidationError` and wrote Arrow rows with empty `source_id` and `target_id`. Both now run the records through `canonical_endpoints` first, so the shared list, order and empty-value rule apply; Parquet keeps its `from_id`/`from`/`to_id`/`to` fallbacks, and an integer id of `0` is now kept as a real id in both, as the shared helper treats it (it used to be dropped by their `or` chains)
   - New tests in `tests/export/test_columnar_exporters_endpoint_names.py` read the written files back for every accepted spelling, an empty canonical value, precedence, an id of `0`, untouched input and mixed batches
