@@ -205,18 +205,22 @@ class BridgeAxiom:
             failure: Optional[str] = None
             cause: Optional[BaseException] = None
             try:
-                # Track the bridge axiom application
-                recorded = prov_manager.track_entity(
-                    entity_id=output_entity,
-                    source=self.source_doi,
-                    entity_type="bridge_axiom_result",
-                    activity_id=f"bridge_axiom_application_{self.axiom_id}",
-                    source_location=self.source_page,
-                    source_quote=self.source_quote,
-                    confidence=self.confidence,
-                    metadata=metadata,
-                    _conn=_conn,
-                )
+                # Track the bridge axiom application. _conn is only passed when
+                # there is a transaction to join: a duck-typed manager may have
+                # an explicit signature without this keyword.
+                track_call = {
+                    "entity_id": output_entity,
+                    "source": self.source_doi,
+                    "entity_type": "bridge_axiom_result",
+                    "activity_id": f"bridge_axiom_application_{self.axiom_id}",
+                    "source_location": self.source_page,
+                    "source_quote": self.source_quote,
+                    "confidence": self.confidence,
+                    "metadata": metadata,
+                }
+                if _conn is not None:
+                    track_call["_conn"] = _conn
+                recorded = prov_manager.track_entity(**track_call)
             except Exception as exc:
                 failure = type(exc).__name__
                 cause = exc

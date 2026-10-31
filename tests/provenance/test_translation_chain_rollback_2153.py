@@ -6,6 +6,7 @@ import pytest
 
 from semantica.provenance import ProvenanceManager
 from semantica.provenance.bridge_axiom import BridgeAxiom, create_translation_chain
+from semantica.provenance.schemas import ProvenanceEntry
 from semantica.provenance.storage import ProvenanceStorage
 from semantica.utils.exceptions import ProvenanceRecordingError
 
@@ -134,3 +135,48 @@ def test_successful_chain_keeps_the_hash_chain_contiguous(tmp_path):
     assert manager.storage.retrieve("e1_transformed_A1") is not None
     assert manager.storage.retrieve("e1_transformed_A1_transformed_A2") is not None
     assert manager.verify_chain()["valid"] is True
+
+
+class _LegacyManager:
+    """A duck-typed manager with an explicit signature and no **kwargs."""
+
+    def __init__(self):
+        self.entries = {}
+
+    def track_entity(
+        self,
+        entity_id,
+        source=None,
+        entity_type=None,
+        activity_id=None,
+        source_location=None,
+        source_quote=None,
+        confidence=None,
+        metadata=None,
+    ):
+        entry = ProvenanceEntry(
+            entity_id=entity_id,
+            entity_type=entity_type,
+            activity_id=activity_id or "",
+            metadata=metadata or {},
+        )
+        self.entries[entity_id] = entry
+        return entry
+
+
+def test_a_manager_with_an_explicit_signature_still_records():
+    legacy = _LegacyManager()
+
+    result = _axiom("A1").apply(input_entity="e1", input_value=3, prov_manager=legacy)
+
+    assert result["provenance_recorded"] is True
+    assert "e1_transformed_A1" in legacy.entries
+
+
+def test_a_manager_with_an_explicit_signature_runs_a_chain():
+    legacy = _LegacyManager()
+
+    chain = create_translation_chain(_input(), [_axiom("A1"), _axiom("A2")], legacy)
+
+    assert len(chain.layers) == 4
+    assert chain.layers[-1]["value"] == 3 * 2.0 * 2.0
