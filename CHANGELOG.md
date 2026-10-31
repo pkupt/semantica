@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The chain now writes its provenance through a single transaction on backends that can roll back (SQLite, in-memory), so a failing step no longer leaves the `<input>_transformed_<axiom>` entities created by the steps before it. `BridgeAxiom.apply()` takes an internal `_conn` and passes it to `track_entity()`
   - Backends without transaction support keep writing step by step; the `ProvenanceRecordingError` now carries `recorded_entities` listing what is actually in the store, so a caller can clean up or resume
   - `create_translation_chain()` accepts `require_provenance` (default `True`, unchanged behavior) to run a chain best-effort. Each layer reports `provenance_recorded`/`provenance_error` and failed steps are collected in `chain.metadata["provenance_failures"]`. New tests in `tests/provenance/test_translation_chain_rollback_2153.py`
+
+- **`pyasn1` was pinned at 0.6.4, which the audit job now flags four times** (fixes #2182) by @sakshi04-ui
+  - `CVE-2026-119194`, `CVE-2026-119195`, `CVE-2026-119196` and `CVE-2026-119197` all resolve to `pyasn1==0.6.4`, pulled in through `google-auth` → `pyasn1-modules`. They are the only findings in `requirements-ci.txt` outside the accepted `opentelemetry-api` advisory, and the scheduled scan on `main` has failed on them since 2026-10-31
+  - `requirements-ci.txt` and `uv.lock` now carry `pyasn1==0.6.5`, the latest release and the first with fixes for all four. Nothing else moves: both files were re-resolved with only `pyasn1` upgraded, and the CI freshness gates (`uv pip compile` against `requirements-ci.txt` and `open-ontologies-extra.txt`, `uv lock --check`) pass unchanged
+
 - **`joserfc` was pinned at 1.7.5, which the audit job now flags** by @Sameer6305
   - `CVE-2026-119284` (`GHSA-9pg5-8c7x-5hfx`): the compact JWS size guard allocated attacker-controlled segments before rejecting them. It is the only finding in `requirements-ci.txt`, so `security-scan` failed every pull request opened after the advisory landed
   - `requirements-ci.txt` and `uv.lock` now carry `joserfc==1.7.7`; 1.7.6 is the first fixed release. Nothing else moves: both files were re-resolved with only `joserfc` upgraded
