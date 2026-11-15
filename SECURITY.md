@@ -10,7 +10,7 @@ upgrade to the latest release to receive them.
 | 0.8.x   | 3.11.5 – 3.13 | :white_check_mark: |
 | < 0.8   | 3.10 – 3.13 | :x:                |
 
-0.7.x is the last line that installs on Python 3.10, so Python 3.10 users
+0.7.x is the last line that installs on Python 3.10 (and on 3.11.0–3.11.4, which the 0.8.x floor excludes), so those users
 receive no further fixes, including the Pillow 13 security fixes, which need
 Python 3.11.5. See the 0.8.0 entry in the CHANGELOG.
 

@@ -245,7 +245,7 @@ never install into your local dev environment from it.
 Regenerate it after changing `pyproject.toml` dependencies:
 
 ```bash
-pip install uv==0.12.1
+pip install uv==0.13.7
 uv pip compile pyproject.toml --python-version 3.11.5 --python-platform linux --extra all --group dev --generate-hashes -o requirements-ci.txt
 ```
 

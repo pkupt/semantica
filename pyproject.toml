@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Semantica", email = "kaif@getsemantica.ai" }]
 maintainers = [{ name = "Semantica", email = "kaif@getsemantica.ai" }]
 
-# Supported: 3.11-3.13. The Install Matrix, the classifiers below and the
+# Supported: 3.11.5-3.13. The Install Matrix, the classifiers below and the
 # Docker image (python:3.13) cover exactly this range; keep them in sync
 # (tests/test_python_support_policy.py enforces it).
 #   - Floor: 3.8/3.9 were dropped in #1506. 3.10 is dropped because it reached
